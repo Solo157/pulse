@@ -1,0 +1,50 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+# DNS-based discovery keeps Prometheus scraping scaled service replicas without reload.
+# Each service exposes its management port from application.yml (defaults 8080..8083).
+scrape_configs:
+  - job_name: metric-service
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: [metric-service]
+        type: A
+        port: 8080
+        refresh_interval: 10s
+    relabel_configs:
+      - target_label: service
+        replacement: metric-service
+
+  - job_name: storage-service
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: [storage-service]
+        type: A
+        port: 8081
+        refresh_interval: 10s
+    relabel_configs:
+      - target_label: service
+        replacement: storage-service
+
+  - job_name: processing-service
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: [processing-service]
+        type: A
+        port: 8082
+        refresh_interval: 10s
+    relabel_configs:
+      - target_label: service
+        replacement: processing-service
+
+  - job_name: notification-service
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: [notification-service]
+        type: A
+        port: 8083
+        refresh_interval: 10s
+    relabel_configs:
+      - target_label: service
+        replacement: notification-service

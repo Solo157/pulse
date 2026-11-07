@@ -1,0 +1,76 @@
+# metric-service (Этап 2): приём метрик с подтверждением Kafka, идемпотентность, PostgreSQL.
+# Redis не используется: идемпотентность ведёт PostgreSQL (согласование п. 5).
+
+spring:
+  application:
+    name: pulse-metric-service
+  datasource:
+    hikari:
+      connection-timeout: 3000
+      validation-timeout: 2000
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/pulse?connectTimeout=2&socketTimeout=5}
+    username: ${SPRING_DATASOURCE_USERNAME:pulse}
+    password: ${SPRING_DATASOURCE_PASSWORD:change-me}
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+  # Read API: второй источник — ClickHouse с историей метрик (пишет storage-service).
+  clickhouse:
+    url: ${PULSE_CLICKHOUSE_URL:jdbc:clickhouse://localhost:8123/pulse?connect_timeout=2000&socket_timeout=10000}
+    username: ${PULSE_CLICKHOUSE_USER:pulse}
+    password: ${PULSE_CLICKHOUSE_PASSWORD:change-me}
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # 202 выдаётся только после подтверждения брокера: acks=all + ожидание future
+      # с таймаутом pulse.publish-ack-timeout в MetricEventPublisher.
+      acks: all
+      properties:
+        enable.idempotence: true
+  jackson:
+    # События и API обмениваются людьми-читаемым JSON: даты строкой ISO-8601 (согласование п. 7).
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: true
+
+server:
+  port: ${METRIC_SERVER_PORT:8080}
+  shutdown: graceful
+  error:
+    include-message: always
+  tomcat:
+    # страховка на случай запросов без Content-Length (согласование п. 5).
+    max-swallow-size: 1MB
+
+pulse:
+  topics:
+    metrics: ${KAFKA_METRICS_TOPIC:metrics}
+    incidents: ${KAFKA_INCIDENTS_TOPIC:incidents}
+  max-points-per-request: 1000
+  max-request-body-bytes: 1048576
+  publish-ack-timeout: 5s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      instance: ${INSTANCE_ID:${spring.application.name}}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z'} %5p [${INSTANCE_ID:pulse-metric-service}] [req=%X{requestId:- }] %logger{20} - %msg%n"
+  level:
+    com.pulse: INFO

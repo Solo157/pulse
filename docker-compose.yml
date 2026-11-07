@@ -1,0 +1,309 @@
+
+networks:
+  pulse:
+    driver: bridge
+
+services:
+  # ============================================================================
+  # POSTGRESQL (single node, multi-schema) — DEMO SPOF, documented
+  # ============================================================================
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    networks: [pulse]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================================================
+  # REDIS (API idempotency keys; keys also persisted to PostgreSQL)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    networks: [pulse]
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ============================================================================
+  # CLICKHOUSE (single node, no sharding; time-range partitioning)
+  # ============================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: clickhouse
+    restart: unless-stopped
+    networks: [pulse]
+    user: root
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
+    ports: ["8123:8123", "9000:9000"]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================================================
+  # KAFKA KRaft cluster (2 brokers + 1 controller-only node for 3-node quor)
+  # FT-8: stopping kafka1 → ISR=1 < minISR=2 → writes blocked ("not enough replicas")
+  #       kafka1 returns → ISR=2 → writes resume. Kafka not fully down (no data loss).
+  # RF=2, minISR=2, acks=all, enable.idempotence=true per §6.6.
+  # ============================================================================
+  kafka1:
+    image: apache/kafka:3.9.0
+    container_name: kafka1
+    restart: unless-stopped
+    networks: [pulse]
+    volumes:
+      - kafka1_data:/var/lib/kafka/data
+    environment:
+      CLUSTER_ID: "pulse-cluster-id-000001"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_BROKER_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+      
+      KAFKA_ADVERTISED_LISTENERS: CLIENT://kafka1:9092,INTERNAL://kafka1:9091
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_REPLICATION_FACTOR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+      KAFKA_LISTENERS: CLIENT://0.0.0.0:9092,INTERNAL://kafka1:9091,CONTROLLER://kafka1:9093
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 | grep -q ApiVersions"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka2:
+    image: apache/kafka:3.9.0
+    container_name: kafka2
+    restart: unless-stopped
+    networks: [pulse]
+    volumes:
+      - kafka2_data:/var/lib/kafka/data
+    environment:
+      CLUSTER_ID: "pulse-cluster-id-000001"
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_BROKER_ID: 2
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+      
+      KAFKA_ADVERTISED_LISTENERS: CLIENT://kafka2:9092,INTERNAL://kafka2:9091
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CLIENT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: CLIENT://0.0.0.0:9092,INTERNAL://kafka2:9091,CONTROLLER://kafka2:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_REPLICATION_FACTOR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
+      KAFKA_LOG_DIRS: \/var\/lib\/kafka\/data
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 | grep -q ApiVersions"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+
+  kafka3:
+    image: apache/kafka:3.9.0
+    container_name: kafka3
+    restart: unless-stopped
+    networks: [pulse]
+    # controller-only, no broker listener
+    # (controller advertises only the CONTROLLER listener address)
+    volumes:
+      - kafka3_data:/var/lib/kafka/data
+    environment:
+      CLUSTER_ID: "pulse-cluster-id-000001"
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+      KAFKA_LISTENERS: CONTROLLER://kafka3:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+  # ============================================================================
+  # NGINX (single Gateway, reverse proxy + least_conn balancing to metric-service)
+  # ============================================================================
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: pulse-nginx
+    restart: unless-stopped
+    networks: [pulse]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports: ["80:80"]
+    depends_on: [metric-service]
+
+  # ============================================================================
+  # APPLICATION SERVICES (1..N scaled via Compose --scale during demo)
+  # ============================================================================
+  metric-service:
+    image: pulse/metric-service:dev
+    build: { context: ., dockerfile: metric-service/Dockerfile }
+    restart: unless-stopped
+    networks: [pulse]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://${POSTGRES_HOST}:5432/${POSTGRES_DB}?connectTimeout=2&socketTimeout=5
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092
+      # Read API (Et5): история метрик читается из ClickHouse
+      PULSE_CLICKHOUSE_URL: jdbc:clickhouse://${CLICKHOUSE_HOST}:8123/${CLICKHOUSE_DB}?connect_timeout=2000&socket_timeout=10000
+      PULSE_CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      PULSE_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka1:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      retries: 5
+      start_period: 40s
+
+  storage-service:
+    image: pulse/storage-service:dev
+    build: { context: ., dockerfile: storage-service/Dockerfile }
+    restart: unless-stopped
+    networks: [pulse]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:clickhouse://${CLICKHOUSE_HOST}:8123/${CLICKHOUSE_DB}?connect_timeout=2000&socket_timeout=10000
+      SPRING_DATASOURCE_USERNAME: ${CLICKHOUSE_USER}
+      SPRING_DATASOURCE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      retries: 5
+      start_period: 40s
+
+  processing-service:
+    image: pulse/processing-service:dev
+    build: { context: ., dockerfile: processing-service/Dockerfile }
+    restart: unless-stopped
+    networks: [pulse]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://${POSTGRES_HOST}:5432/${POSTGRES_DB}?connectTimeout=2&socketTimeout=5
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/actuator/health"]
+      interval: 10s
+      retries: 5
+      start_period: 40s
+
+  notification-service:
+    image: pulse/notification-service:dev
+    build: { context: ., dockerfile: notification-service/Dockerfile }
+    restart: unless-stopped
+    networks: [pulse]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://${POSTGRES_HOST}:5432/${POSTGRES_DB}?connectTimeout=2&socketTimeout=5
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/actuator/health"]
+      interval: 10s
+      retries: 5
+      start_period: 40s
+
+  # ============================================================================
+  # OBSERVABILITY PROFILE (optional --profile obs)
+  # ============================================================================
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v2.54.0
+    container_name: pulse-prometheus
+    restart: unless-stopped
+    networks: [pulse]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports: ["9090:9090"]
+
+  grafana:
+    profiles: [obs]
+    image: grafana/grafana:11.2.0
+    container_name: pulse-grafana
+    restart: unless-stopped
+    networks: [pulse]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
+  redis_data:
+  kafka1_data:
+  kafka2_data:
+  kafka3_data:
+  prometheus_data:
+  grafana_data:
