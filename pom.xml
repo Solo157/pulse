@@ -35,6 +35,7 @@
 
         <!-- Infrastructure / library versions pinned explicitly (no `latest`). -->
         <clickhouse.jdbc.version>0.6.5</clickhouse.jdbc.version>
+        <resilience4j.version>2.4.0</resilience4j.version>
         <redisson.version>3.34.1</redisson.version>
         <lombok.version>1.18.34</lombok.version>
         <docker.image.suffix>0.0.1-SNAPSHOT</docker.image.suffix>

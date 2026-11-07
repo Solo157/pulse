@@ -8,6 +8,7 @@ import com.pulse.metric.service.UserService;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.UUID;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -41,9 +42,11 @@ public class ReadController {
      * @param from       начало интервала включительно (ISO-8601), по умолчанию «с начала»
      * @param to         конец интервала включительно, по умолчанию «до сейчас»
      * @param limit      размер выборки, по умолчанию 100, максимум 1000
+     *                   Выполняется асинхронно ({@code CompletableFuture} за TimeLimiter/
+     *                   CircuitBreaker): Spring MVC удерживает запрос до завершения выборки.
      */
     @GetMapping("/users/{userId}/metrics")
-    public List<MetricReading> metrics(
+    public CompletableFuture<List<MetricReading>> metrics(
             @PathVariable("userId") UUID userId,
             @RequestParam(name = "metric", required = false) String metricName,
             @RequestParam(name = "from", required = false)
@@ -65,7 +68,7 @@ public class ReadController {
      * @param limit размер выборки, по умолчанию 100, максимум 1000
      */
     @GetMapping("/users/{userId}/incidents")
-    public List<IncidentResponse> incidents(
+    public CompletableFuture<List<IncidentResponse>> incidents(
             @PathVariable("userId") UUID userId,
             @RequestParam(name = "from", required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,

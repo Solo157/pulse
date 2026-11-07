@@ -85,3 +85,29 @@
 - Границы времени в CH-запросе — литерал `parseDateTimeBestEffort('<ISO-8601>')`: ClickHouse JDBC
   (SqlBasedPreparedStatement) подставляет параметры как текст, и `Timestamp.toString()` с пробелом
   ломает синтаксис. Значения форматируются из `Instant`, инъекция исключена.
+
+## Fast-fail read-пути (закрытие находки F5 fault-injection)
+
+- Read-запросы (`UserReadService.getHistory/getIncidents`) защищены связкой
+  **resilience4j TimeLimiter + CircuitBreaker** (цепи `chRead`/`pgRead`, конфиг в
+  `application.yml`): зависшая выборка принудительно обрывается по таймауту (3 с),
+  сбои копятся в блокере, открытая цепь мгновенно отвечает `DataUnavailableException`
+  → 503 RFC 7807; half-open проверяет восстановление (`automatic-transition`).
+  Метрики `resilience4j_circuitbreaker_*` на `/actuator/prometheus` (панель в Grafana — из списка
+  бэклога).
+- **Почему программно, а не аннотациями**: `@TimeLimiter` оборачивает уже вычисленный
+  `CompletableFuture`, а блокирующий JDBC-вызов к моменту возврата из метода уже
+  выполнен на потоке запроса (проверено смоуком: 30 с сохранялись). Выборка выполняется
+  в изолированном пуле (8 потоков/очередь 32), future ограничивается
+  `TimeLimiter.decorateCompletionStage` + shared `ScheduledExecutorService`; внешний
+  `CircuitBreaker.executeCompletionStage` фиксирует и асинхронные сбои (в т.ч.
+  `TimeoutException`) — проверено min-тестом и `ReadFailFastIntegrationTest`.
+- **Что висит после обрыва**: сокет JDBC не прерывается, «сирота» доживает в пуле
+  выборок — ограничено потоками и очередью; отказ очереди → 503. В проде потолок даёт и
+  nginx `proxy_read_timeout`. Accepted trade-off демо.
+- `hikari.connection-timeout=3s` на обоих источниках metric-service — полезный фон,
+  но НЕ решает задачу (драйвер ClickHouse игнорирует connect_timeout при HTTP-висяке:
+  замеренные 30 с оставались до появления TimeLimiter).
+- Смоук (стенд, `docker compose stop clickhouse`): 1-е обращение ~1,1 с → 503, далее
+  ~100 мс (цепь открыта), инциденты (PG, своя цепь) — 200 всюду; после старта CH и
+  перезапуска metric-service — 200 сразу; state-метрики closed/open видны в Prometheus.

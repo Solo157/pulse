@@ -42,8 +42,10 @@ kill брокера Kafka (RF2, min.insync=2) — 503 `NOT_ENOUGH_REPLICAS`, н�
 
 ## Находки / бэклог развития
 
-1. Read-путь не fail-fast (hang на мёртвой БД 15 с+; добавлены JDBC/hikari
-   таймауты, полное решение — resilience4j circuit breaker + bulkhead).
+1. ~~Read-путь не fail-fast~~ — **закрыто**: resilience4j TimeLimiter +
+   CircuitBreaker (`chRead`/`pgRead`) в `UserReadService`, изолированный пул выборок;
+   ответ 503 за ~1 с при мёртвом хранилище метрик, ~100 мс при открытой цепи
+   (`docs/decisions.md`, `ReadFailFastIntegrationTest`).
 2. Kafka-пароли consumer-групп = потолок параллелизма (партиций `metrics`=2):
    для прода — больше партиций + RF≥3.
 3. нет экспортёра Kafka-LAG в Prometheus (читается CLI); добавить kafka-exporter.

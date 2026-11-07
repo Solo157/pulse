@@ -1,6 +1,7 @@
 package com.pulse.metric.web;
 
 import com.pulse.metric.config.RequestIdFilter;
+import com.pulse.metric.exception.DataUnavailableException;
 import com.pulse.metric.exception.EmailAlreadyRegisteredException;
 import com.pulse.metric.exception.IdempotencyConflictException;
 import com.pulse.metric.exception.KafkaUnavailableException;
@@ -60,6 +61,11 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(KafkaUnavailableException.class)
     public ProblemDetail kafkaUnavailable(KafkaUnavailableException exception) {
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, "Сервис временно недоступен, попробуйте позже");
+    }
+
+    @ExceptionHandler(DataUnavailableException.class)
+    public ProblemDetail dataUnavailable(DataUnavailableException exception) {
         return problem(HttpStatus.SERVICE_UNAVAILABLE, "Сервис временно недоступен, попробуйте позже");
     }
 

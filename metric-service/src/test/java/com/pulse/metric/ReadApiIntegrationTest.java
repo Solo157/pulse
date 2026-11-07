@@ -1,5 +1,6 @@
 package com.pulse.metric;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -31,6 +32,9 @@ import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -41,6 +45,7 @@ import org.testcontainers.utility.DockerImageName;
  * Read API (FR-4, Этап 5): клиент читает только свои данные.
  * Метрики — из реального ClickHouse, инциденты — из PostgreSQL (сидируются напрямую,
  * их пишет ProcessingService). Аутентификация — Basic (login = userId).
+ * Read-endpoints асинхронные (TimeLimiter) — проверки идут через {@link #read}.
  */
 @SpringBootTest(properties = "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}")
 @AutoConfigureMockMvc
@@ -104,7 +109,7 @@ class ReadApiIntegrationTest {
         givenIncident(owner.id(), "OPEN");
 
         // Фильтры metric/from/limit отрабатывают так же, как без них.
-        mockMvc.perform(get("/users/{id}/metrics", owner.id()).headers(basic(owner))
+        read(get("/users/{id}/metrics", owner.id()).headers(basic(owner))
                         .param("metric", "temperature")
                         .param("from", "2026-11-06T00:00:00Z")
                         .param("limit", "5"))
@@ -112,7 +117,7 @@ class ReadApiIntegrationTest {
                 .andExpect(jsonPath("$[0].name").value("temperature"))
                 .andExpect(jsonPath("$[0].value").value(85.0));
 
-        mockMvc.perform(get("/users/{id}/incidents", owner.id()).headers(basic(owner)))
+        read(get("/users/{id}/incidents", owner.id()).headers(basic(owner)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].ruleId").value("temperature-high"))
                 .andExpect(jsonPath("$[0].status").value("OPEN"));
@@ -124,7 +129,7 @@ class ReadApiIntegrationTest {
         Owner stranger = register("stranger@pulse.dev");
         givenMetricPoint(owner.id(), "temperature", 42.0, Instant.parse("2026-11-06T10:00:00Z"));
 
-        mockMvc.perform(get("/users/{id}/metrics", owner.id()).headers(basic(stranger)))
+        read(get("/users/{id}/metrics", owner.id()).headers(basic(stranger)))
                 .andExpect(status().isForbidden())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON));
     }
@@ -133,12 +138,12 @@ class ReadApiIntegrationTest {
     void безУчётныхДанныхИлиСНевернымПаролемСорокОдин() throws Exception {
         Owner owner = register("noauth@pulse.dev");
 
-        mockMvc.perform(get("/users/{id}/metrics", owner.id()))
+        read(get("/users/{id}/metrics", owner.id()))
                 .andExpect(status().isUnauthorized())
                 .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE,
                         org.hamcrest.Matchers.containsString("Basic")));
 
-        mockMvc.perform(get("/users/{id}/metrics", owner.id())
+        read(get("/users/{id}/metrics", owner.id())
                         .headers(basic(owner.id(), "wrong-password")))
                 .andExpect(status().isUnauthorized());
     }
@@ -153,6 +158,20 @@ class ReadApiIntegrationTest {
                                 Map.of("name", "temperature", "value", 20.0,
                                         "timestamp", "2026-11-06T10:00:00Z"))))))
                 .andExpect(status().isAccepted());
+    }
+
+    /**
+     * Асинхронно-aware GET: читающий endpoint отдаёт {@code CompletableFuture} (TimeLimiter),
+     * поэтому при старте async-контекста повторяем тот же запрос с той же учётной строкой —
+     * этот диспатч завершает обработку и несёт итоговый статус.
+     */
+    private ResultActions read(MockHttpServletRequestBuilder request) throws Exception {
+        ResultActions actions = mockMvc.perform(request);
+        MvcResult result = actions.andReturn();
+        if (result.getRequest().isAsyncStarted()) {
+            actions = mockMvc.perform(asyncDispatch(result));
+        }
+        return actions;
     }
 
     private Owner register(String email) throws Exception {
