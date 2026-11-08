@@ -90,6 +90,13 @@ threshold, value, createdAt, sampleTime, schemaVersion, requestId}`. Ошибк�
 - **Ingest**: `202` выдаётся только после `acks=all` подтверждения брокеров
   (ожидание future с таймаутом `pulse.publish-ack-timeout` = 5 c); мёртвый
   Kafka → 503 с предложением повторить позже.
+- **Обработка инцидентов**: переход состояния инцидента и запись события
+  `IncidentDetected` в таблицу-очередь `metric.incident_outbox` фиксируются
+  одной транзакцией PostgreSQL. Отдельный отправитель раз в секунду добирает
+  неоправленные события (после сбоя Kafka или падения сервиса) с растущей
+  паузой повтора; повторная отправка отдаёт то же событие с тем же `eventId`,
+  потребители от него защищены. Опубликованные записи очищаются через
+  `pulse.outbox-retention`.
 - **Консьюмеры**: `auto-offset-reset=earliest`, commit пачки после записи,
   `DefaultErrorHandler` = бесконечные повторы через 2 с (Kafka/БД ждём, не теряем;
   отравленные сообщения десериализуются в dead-letter-логирование конвертером).
@@ -144,8 +151,11 @@ compose задаёт только адреса (`SPRING_DATASOURCE_URL`, `PULSE_
 | `pulse.rule-cache-ttl` (`PULSE_RULE_CACHE_TTL`) | 30s | как часто перечитывать правила из базы |
 | `pulse.close-cooldown` (`PULSE_CLOSE_COOLDOWN`) | 60s | не закрывать инцидент чаще раза в минуту (защита от дребезга) |
 | `pulse.publish-ack-timeout` | 5s | ack для `incidents` |
+| `pulse.outbox-poll-interval` (`PULSE_OUTBOX_POLL_INTERVAL`) | 1s | как часто отправитель добирает очередь `metric.incident_outbox`; он же база паузы повтора (удваивается) |
+| `pulse.outbox-batch-size` (`PULSE_OUTBOX_BATCH_SIZE`) | 100 | событий в одной порции отправки |
+| `pulse.outbox-retention` (`PULSE_OUTBOX_RETENTION`) | 7d | срок хранения отправленных записей очереди |
 | producer `acks=all` + idempotence | — | как ingest |
-| метрики | `pulse.processing.points` | — |
+| метрики | `pulse.processing.points`, `pulse.processing.outbox.pending`, `pulse.processing.outbox.oldest-pending-seconds`, `pulse.processing.outbox.published/failed` | глубина и задержка очереди отправки событий |
 
 ### notification-service (8083)
 

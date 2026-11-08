@@ -112,3 +112,30 @@
 - Смоук (стенд, `docker compose stop clickhouse`): 1-е обращение ~1,1 с → 503, далее
   ~100 мс (цепь открыта), инциденты (PG, своя цепь) — 200 всюду; после старта CH и
   перезапуска metric-service — 200 сразу; state-метрики closed/open видны в Prometheus.
+
+## Transactional outbox событий инцидентов (закрытие P0-1)
+
+- Дефект: `IncidentEvaluator` публиковал `IncidentDetected` в Kafka сразу после
+  перехода `metric.incident_state` (два независимых шага). Сбой между ними при
+  недоступной Kafka терял событие навсегда: при повторной доставке пакета
+  инцидент уже «открыт» — ветка публикации больше не выполнялась. Заявленная
+  в javadoc гарантия (публикация ДО фиксации, потеря невозможна) была инвертирована.
+- Решение (референс — transactional outbox): таблица `metric.incident_outbox`,
+  запись события — в той же транзакции PostgreSQL, что и переход состояния.
+  `IncidentEvaluator.process` помечен `@Transactional` (пакет = транзакция:
+  откат откатывает и `registerSample`, поэтому повтор пакета не «съедается»
+  фильтром out-of-order). Переходы `openIncident/closeIncident` получили условие
+  по `open` и возвращают факт перехода — событие ставится в очередь только при
+  реальном переходе (плюс защита от `ON CONFLICT (id) DO NOTHING`).
+- `eventId` события генерируется один раз при постановке в очередь и является
+  primary key записи outbox: повторные публикации байт-в-байт идентичны, а
+  потребители already идемпотентны по `eventId`/`incidentKey`.
+- Отправитель (`OutboxDrainer`, `@Scheduled`, отключаемый
+  `pulse.outbox-scheduling-enabled`): порция через `UPDATE ... WHERE id IN (SELECT
+  ... FOR UPDATE SKIP LOCKED LIMIT n) RETURNING` с держанием `lock_until`
+  (переживает смерть отправителя), пауза повтора `outbox-poll-interval * 2^attempt`,
+  чистка опубликованного по `outbox-retention`. `KafkaTemplate.send` при
+  недоступном кластере отказывает синхронно (`max.block.ms=2s`, иначе висит 60 с) —
+  `KafkaException` тоже считается неудачей порции.
+- Метрики: `pulse.processing.outbox.pending`, `oldest-pending-seconds`,
+  `published`, `failed`.

@@ -44,6 +44,26 @@ ALTER TABLE metric.incidents ADD COLUMN IF NOT EXISTS incident_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS incidents_incident_key_uidx
     ON metric.incidents (incident_key);
 
+-- Transactional outbox событий IncidentDetected (раздел 8): переход state-машины
+-- и запись события — один транзакционный шаг с metric.incident_state. Отдельный
+-- оповещатель добирает непроявленные строки после сбоя Kafka или падения сервиса,
+-- поэтому событие инцидента не теряется никогда (at-least-once, eventId стабилен).
+-- lock_until — чернование порций оповещателем (FOR UPDATE SKIP LOCKED), переживает
+-- падение оповещателя: просроченный черновик виден следующему проходу.
+CREATE TABLE IF NOT EXISTS metric.incident_outbox (
+    id              UUID PRIMARY KEY,
+    message_key     TEXT NOT NULL,
+    payload         TEXT NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    published_at    TIMESTAMPTZ,
+    attempts        INT NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_error      TEXT,
+    lock_until      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS incident_outbox_pending_idx
+    ON metric.incident_outbox (next_attempt_at) WHERE published_at IS NULL;
+
 -- Правила мониторинга: владелец — ProcessingService (раздел 10). В ДЕМО одно правило,
 -- оператор один: value > threshold.
 CREATE TABLE IF NOT EXISTS metric.monitoring_rules (

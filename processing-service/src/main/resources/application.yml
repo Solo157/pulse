@@ -22,6 +22,9 @@ spring:
       acks: all
       properties:
         enable.idempotence: true
+        # При недоступном кластере отправка отказывает синхронно за 2 с, а не висит 60 с —
+        # оповещатель outbox освобождается для следующей порции.
+        max.block.ms: ${PULSE_KAFKA_MAX_BLOCK_MS:2000}
     consumer:
       group-id: processing-group
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
@@ -48,6 +51,11 @@ pulse:
   close-cooldown: ${PULSE_CLOSE_COOLDOWN:60s}
   rule-cache-ttl: ${PULSE_RULE_CACHE_TTL:30s}
   publish-ack-timeout: ${PULSE_PUBLISH_ACK_TIMEOUT:5s}
+  # Transactional outbox событий инцидентов см. раздел 8: оповещатель добирает
+  # непроявленные записи после сбоя Kafka; пауза повтора = poll-interval * 2^n.
+  outbox-poll-interval: ${PULSE_OUTBOX_POLL_INTERVAL:1s}
+  outbox-batch-size: ${PULSE_OUTBOX_BATCH_SIZE:100}
+  outbox-retention: ${PULSE_OUTBOX_RETENTION:7d}
 
 management:
   endpoints:
