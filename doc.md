@@ -21,7 +21,7 @@ client ──> nginx :80 ──> metric-service ──> Kafka [metrics] ──> 
 | Компонент | Роль | Внутренний порт |
 |---|---|---|
 | `nginx` | единственная точка входа, сам находит новые копии сервиса, повторяет запрос при ошибке | `:80` на хосте |
-| `metric-service` | регистрация (BCrypt), ingest с подтверждением Kafka, read API владельца | 8080 |
+| `metric-service` | регистрация (BCrypt), устойчивый ingest (очередь в PostgreSQL + доставка в Kafka), read API владельца | 8080 |
 | `storage-service` | читает `metrics` пачками, пишет точки в ClickHouse | 8081 |
 | `processing-service` | читает `metrics`: пороги, открытие/закрытие инцидентов, публикует `incidents` | 8082 |
 | `notification-service` | читает `incidents`: доставка + запись статуса в базу | 8083 |
@@ -74,7 +74,7 @@ ClickHouse: `pulse.metric_points (userId, metricName, value, timestamp, eventId)
 | Метод | Тело / заголовки | Успех | Ошибки |
 |---|---|---|---|
 | `POST /auth/register` | `{"email","password"}` (пароль ≥ 8) | `201 {"userId"}` | 400 (валидация), дубль email → 409 |
-| `POST /users/{id}/metrics` | Basic (`userId:пароль`, владелец), `Idempotency-Key` обязателен, JSON `{metrics:[{name,value,timestamp}]}` | `202 {eventId, userId, acceptedCount}` | 401/403, 400 (лимиты, JSON), 422, 503 (Kafka/цепи) |
+| `POST /users/{id}/metrics` | Basic (`userId:пароль`, владелец), `Idempotency-Key` обязателен, JSON `{metrics:[{name,value,timestamp}]}` | `202 {eventId, userId, acceptedCount}` — пакет устойчиво записан в PostgreSQL (доставка в Kafka из очереди); повтор тем же ключом и телом отдаёт тот же ответ | 401/403, 400 (лимиты, JSON), 422, 409 (тот же ключ — другое тело), 503 (неисправен PostgreSQL) |
 | `GET /users/{id}/metrics` | Basic, владелец; параметры адреса `metric`,`from`,`to`,`limit` — все необязательные | `200 [point…]` (из ClickHouse) | 401/403, 400 (неверные параметры), 503 сразу, если ClickHouse неисправен |
 | `GET /users/{id}/incidents` | Basic, владелец; параметры `from`,`limit` | `200 [incident…]` (из PostgreSQL) | 401/403, 503 сразу при неисправной базе (цепь `pgRead`) |
 
@@ -87,9 +87,14 @@ threshold, value, createdAt, sampleTime, schemaVersion, requestId}`. Ошибк�
 
 ## 5. Отказоустойчивость
 
-- **Ingest**: `202` выдаётся только после `acks=all` подтверждения брокеров
-  (ожидание future с таймаутом `pulse.publish-ack-timeout` = 5 c); мёртвый
-  Kafka → 503 с предложением повторить позже.
+- **Ingest**: `202` выдаётся после устойчивой записи пакета в PostgreSQL —
+  журнал идемпотентности и событие в таблице-очереди `metric.ingest_outbox`
+  создаются одной транзакцией. Отдельный отправитель добирает очередь в Kafka
+  at-least-once (ack `acks=all`, растущая пауза повтора); мёртвая Kafka больше
+  не даёт 503 — она только задерживает доставку. Повтор с тем же
+  `Idempotency-Key` и телом отдаёт прежний ответ, с другим телом — 409.
+  Опубликованные записи очищаются по `pulse.outbox-retention`, журнал — по
+  `pulse.idempotency-retention`.
 - **Обработка инцидентов**: переход состояния инцидента и запись события
   `IncidentDetected` в таблицу-очередь `metric.incident_outbox` фиксируются
   одной транзакцией PostgreSQL. Отдельный отправитель раз в секунду добирает
@@ -124,11 +129,15 @@ compose задаёт только адреса (`SPRING_DATASOURCE_URL`, `PULSE_
 |---|---|---|
 | `pulse.max-points-per-request` | 1000 | лимит точек в пакете |
 | `pulse.max-request-body-bytes` | 1 MiB | лимит тела (страховка tomcat `max-swallow-size` 1MB) |
-| `pulse.publish-ack-timeout` | 5s | ожидание ack Kafka до 503 |
+| `pulse.publish-ack-timeout` | 5s | ожидание ack Kafka при отправке из очереди |
+| `pulse.outbox-poll-interval` (`PULSE_OUTBOX_POLL_INTERVAL`) | 1s | период отправителя очереди `metric.ingest_outbox`; база паузы повтора (удваивается) |
+| `pulse.outbox-batch-size` (`PULSE_OUTBOX_BATCH_SIZE`) | 100 | событий в одной порции отправки |
+| `pulse.outbox-retention` (`PULSE_OUTBOX_RETENTION`) | 7d | срок хранения отправленных записей очереди |
+| `pulse.idempotency-retention` (`PULSE_IDEMPOTENCY_RETENTION`) | 30d | срок хранения завершённых записей журнала идемпотентности |
 | `spring.datasource.hikari.connection-timeout / validation-timeout` | 3000 / 2000 мс | пул соединений к PostgreSQL; настройки привязаны прямо к объекту пула (см. `ClickHouseConfig`) |
 | `spring.clickhouse.hikari.connection-timeout` | 3000 мс | пул соединений к ClickHouse (чтение) |
 | параметры в JDBC URL | PostgreSQL `connectTimeout=2&socketTimeout=5` с; ClickHouse `connect_timeout=2000&socket_timeout=10000` мс | драйвер отвечает быстрее, чем пул, — сбой заметен сразу |
-| `spring.kafka.producer.acks` / `enable.idempotence` | all / true | код 202 означает: данные записаны во все копии, дубли при ретрах исключены |
+| `spring.kafka.producer.acks` / `enable.idempotence` | all / true | отправка из очереди подтверждена всеми копиями, дубли при повторах исключены; eventId первичный ключ очереди |
 | `resilience4j.timelimiter…timeout-duration` | 3s, cancel-running-future | жёсткий потолок запроса чтения |
 | `resilience4j.circuitbreaker.{chRead,pgRead}` | window 10, min-calls 4, slow >3s / 60 %, fail >50 %, open 10s, half-open 2, авто-переход | fail-fast read |
 

@@ -139,3 +139,28 @@
   `KafkaException` тоже считается неудачей порции.
 - Метрики: `pulse.processing.outbox.pending`, `oldest-pending-seconds`,
   `published`, `failed`.
+
+## Устойчивый ingest: outbox + журнал идемпотентности (закрытие P0-2)
+
+- Дефект: `MetricIngestService` публиковал в Kafka до закрытия журнала
+  идемпотентности и при любой ошибке публикации удалял запись `IN_PROGRESS`.
+  Таймаут ack не доказывает незапись в Kafka — клиентский повтор мог создать
+  второе событие с новым eventId; падение после ack, но до `markCompleted`,
+  оставляло `IN_PROGRESS` навсегда (клиент получал 409 бесконечно).
+- Решение: таблица `metric.ingest_outbox` + журнал в одной транзакции
+  (`@Transactional` на `ingest`). eventId генерируется при создании приёма и
+  является primary key очереди; HTTP 202 = устойчивый приём (пара записей в
+  PostgreSQL), а не попытка отправки. Отправитель (`IngestOutboxDrainer`,
+  порция `FOR UPDATE SKIP LOCKED` + `lock_until`, пауза `poll-interval * 2^n`)
+  закрывает outbox и журнал одной транзакцией; если процесс упал ровно между
+  ack и закрытием — `reconcileCompleted()` перед каждой порцией догоняет статус,
+  вечного `IN_PROGRESS` нет.
+- Контроль тела: `request_hash` (SHA-256 канонического JSON точек);
+  повтор того же ключа с другим телом — 409 (раньше такое молча получало чужой
+  accepted-ответ). Смена семантики ошибок: недоступная Kafka больше не 503
+  (доставка задерживается); 503 остаётся только за неисправным PostgreSQL.
+  Класс/обработчик `KafkaUnavailableException` удалены.
+- Хранение: outbox — `pulse.outbox-retention` (7д), журнал — `pulse.idempotency-retention` (30д),
+  чистка по расписанию. Метрики `pulse.ingest.outbox.*`.
+- Побочное: `max.block.ms=2s` на продюсерах (метрика+обработка) — при мёртвом
+  кластере синхронный отказ вместо зависания на 60 с.

@@ -1,9 +1,10 @@
 package com.pulse.metric.service;
 
-import com.pulse.contracts.dto.IngestResponse;
-import com.pulse.contracts.dto.MetricBatchRequest;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pulse.contracts.common.MetricPoint;
 import com.pulse.metric.config.PulseProperties;
+import com.pulse.contracts.dto.IngestResponse;
+import com.pulse.contracts.dto.MetricBatchRequest;
 import com.pulse.metric.exception.IdempotencyConflictException;
 import com.pulse.metric.exception.PayloadTooLargeException;
 import com.pulse.metric.exception.UserNotFoundException;
@@ -15,10 +16,16 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Приём пакета метрик (FR-2): проверка пользователя и лимитов, идемпотентность,
- * публикация с ожиданием подтверждения брокера.
+ * устойчивый приём в transactional outbox.
+ *
+ * <p>HTTP 202 означает, что пакет зафиксирован в PostgreSQL (запись журнала
+ * идемпотентности + событие в очереди {@code ingest_outbox} — одна транзакция).
+ * Доставка в Kafka выполняется из очереди at-least-once и не участвует в ответе:
+ * недоступная Kafka задерживает доставку, но не превращает устойчивый приём в 503.</p>
  */
 @Service
 public class MetricIngestService {
@@ -26,21 +33,24 @@ public class MetricIngestService {
     private static final Logger log = LoggerFactory.getLogger(MetricIngestService.class);
 
     private final UserService userService;
-    private final MetricEventPublisher publisher;
+    private final IngestOutboxService outbox;
     private final IngestIdempotencyRepository idempotencyRepository;
+    private final ObjectMapper objectMapper;
     private final int maxPointsPerRequest;
     private final Counter acceptedCounter;
     private final Counter rejectedCounter;
     private final Counter replayCounter;
 
     public MetricIngestService(UserService userService,
-                               MetricEventPublisher publisher,
+                               IngestOutboxService outbox,
                                IngestIdempotencyRepository idempotencyRepository,
+                               ObjectMapper objectMapper,
                                PulseProperties properties,
                                MeterRegistry meterRegistry) {
         this.userService = userService;
-        this.publisher = publisher;
+        this.outbox = outbox;
         this.idempotencyRepository = idempotencyRepository;
+        this.objectMapper = objectMapper;
         this.maxPointsPerRequest = properties.maxPointsPerRequest();
         this.acceptedCounter = meterRegistry.counter("pulse.ingest.accepted");
         this.rejectedCounter = meterRegistry.counter("pulse.ingest.rejected");
@@ -48,14 +58,14 @@ public class MetricIngestService {
     }
 
     /**
-     * Обрабатывает один пакет метрик.
+     * Обрабатывает один пакет метрик. Весь шаг «приём» — одна транзакция PostgreSQL.
      *
      * @throws UserNotFoundException      пользователь не зарегистрирован (404)
-     * @throws IllegalArgumentException    невалидный пакет (400)
-     * @throws com.pulse.metric.exception.PayloadTooLargeException слишком много точек (413)
-     * @throws IdempotencyConflictException повтор с незавершённым ключом (409)
-     * @throws com.pulse.metric.exception.KafkaUnavailableException брокер не подтвердил запись (503)
+     * @throws IllegalArgumentException   невалидный пакет (400)
+     * @throws PayloadTooLargeException   слишком много точек (413)
+     * @throws IdempotencyConflictException повтор с другим телом (409)
      */
+    @Transactional
     public IngestResponse ingest(UUID userId, MetricBatchRequest request, String idempotencyKey,
                                  String requestId) {
         if (request == null || request.metrics() == null || request.metrics().isEmpty()) {
@@ -65,7 +75,7 @@ public class MetricIngestService {
         List<MetricPoint> points = request.metrics();
         if (points.size() > maxPointsPerRequest) {
             rejectedCounter.increment();
-            throw new com.pulse.metric.exception.PayloadTooLargeException(
+            throw new PayloadTooLargeException(
                     "Слишком большой пакет: " + points.size() + " точек, максимум " + maxPointsPerRequest);
         }
         validatePoints(points);
@@ -74,37 +84,39 @@ public class MetricIngestService {
             throw new UserNotFoundException(userId.toString());
         }
 
-        if (!idempotencyRepository.tryCreate(idempotencyKey, userId)) {
-            return handleExistingClaim(userId, idempotencyKey);
+        String requestHash = IngestRequestHasher.hash(objectMapper, points);
+        String eventId = UUID.randomUUID().toString();
+        if (!idempotencyRepository.tryCreate(idempotencyKey, userId,
+                eventId, points.size(), requestHash)) {
+            return handleExistingClaim(userId, idempotencyKey, requestHash);
         }
-
-        String eventId;
-        try {
-            eventId = publisher.publish(userId, points, requestId);
-        } catch (RuntimeException exception) {
-            // Публикация не подтверждена: убираем IN_PROGRESS, чтобы клиент мог повторить тот же ключ.
-            idempotencyRepository.delete(idempotencyKey, userId);
-            throw exception;
-        }
-        idempotencyRepository.markCompleted(idempotencyKey, userId, eventId, points.size());
+        outbox.accept(eventId, userId.toString(), points, requestId);
         acceptedCounter.increment(points.size());
-        log.info("Пакет принят: пользователь {}, событий {}, точек {}", userId, eventId, points.size());
+        log.info("Пакет устойчиво принят: пользователь {}, событие {}, точек {}",
+                userId, eventId, points.size());
         return new IngestResponse(eventId, userId.toString(), points.size());
     }
 
-    private IngestResponse handleExistingClaim(UUID userId, String idempotencyKey) {
+    /**
+     * Ключ занят: тот же отпечаток тела — повтор, отвечаем прежним accepted-ответом
+     * (на любом статусе: IN_PROGRESS тоже устойчиво принят, событие уже в очереди).
+     * Другое тело под тем же ключом — 409.
+     */
+    private IngestResponse handleExistingClaim(UUID userId, String idempotencyKey, String requestHash) {
         List<IngestIdempotencyRepository.Row> rows = idempotencyRepository.find(idempotencyKey, userId);
         if (rows.isEmpty()) {
-            // Гонка: запись появилась и пропала между проверками. Повтор с тем же ключом.
+            // Гонка с политикой хранения: запись удалена между проверками. Повтор запроса.
             throw new IdempotencyConflictException();
         }
         IngestIdempotencyRepository.Row row = rows.get(0);
-        if (IngestIdempotencyRepository.STATUS_COMPLETED.equals(row.status())) {
-            replayCounter.increment();
-            log.debug("Повтор идемпотентного запроса {}, отдаём прежний ответ", idempotencyKey);
-            return new IngestResponse(row.eventId(), userId.toString(), row.acceptedCount());
+        if (!IngestRequestHasher.matches(row.requestHash(), requestHash)) {
+            throw new IdempotencyConflictException(
+                    "Ключ идемпотентности уже использован с другим телом запроса");
         }
-        throw new IdempotencyConflictException();
+        replayCounter.increment();
+        log.debug("Повтор идемпотентного запроса {}, отдаём прежний ответ ({})",
+                idempotencyKey, row.status());
+        return new IngestResponse(row.eventId(), userId.toString(), row.acceptedCount());
     }
 
     private void validatePoints(List<MetricPoint> points) {

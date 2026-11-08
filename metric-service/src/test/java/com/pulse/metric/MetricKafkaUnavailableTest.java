@@ -22,13 +22,17 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * FR-2 и раздел 9: недоступность Kafka не маскируется 202.
- * Отдельный контекст с недостижимым брокером; ждём короткий таймаут publish-ack.
+ * P0-2, критерий 7: HTTP 202 означает устойчивый приём (запись в PostgreSQL-очередь),
+ * а не попытку отправить сообщение. При недостижимом брокере приём остаётся 202,
+ * событие ждёт в ingest_outbox, повтор ключа отвечает тем же eventId.
+ * Отправка из очереди здесь невозможна и лишь копит попытки с паузами.
  */
 @SpringBootTest(properties = {
         "spring.kafka.bootstrap-servers=localhost:2",
         "spring.kafka.producer.properties.max.block.ms=500",
+        "spring.kafka.listener.auto-startup=false",
         "pulse.publish-ack-timeout=500ms",
+        "pulse.outbox-scheduling-enabled=false",
         "management.health.defaults.enabled=false"
 })
 @AutoConfigureMockMvc
@@ -55,8 +59,7 @@ class MetricKafkaUnavailableTest {
     private JdbcTemplate jdbcTemplate;
 
     @Test
-    void регистрацияРаботаетПриНедоступнойKafkaПриёмДаёт503ИНеОставляетЗаблокированныхКлючей()
-            throws Exception {
+    void приёмУстойчивПриНедоступнойKafkaИНеТребуетНовогоКлюча() throws Exception {
         String body = mockMvc.perform(post("/auth/register")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
@@ -64,19 +67,35 @@ class MetricKafkaUnavailableTest {
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
         String userId = objectMapper.readTree(body).get("userId").asText();
+        String key = UUID.randomUUID().toString();
+        String metric = "{\"metrics\":[{\"name\":\"cpu\",\"value\":1,"
+                + "\"timestamp\":\"2026-11-06T10:00:00Z\"}]}";
 
-        mockMvc.perform(post("/users/" + userId + "/metrics")
-                        .header("Idempotency-Key", UUID.randomUUID().toString())
+        String accepted = mockMvc.perform(post("/users/" + userId + "/metrics")
+                        .header("Idempotency-Key", key)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"metrics\":[{\"name\":\"cpu\",\"value\":1,"
-                                + "\"timestamp\":\"2026-11-06T10:00:00Z\"}]}"))
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.status").value(503));
+                        .content(metric))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString();
+        String eventId = objectMapper.readTree(accepted).get("eventId").asText();
 
-        // Незавершённый шаг приёма снят: клиент может повторить запрос после восстановления Kafka.
-        Integer stuck = jdbcTemplate.queryForObject(
-                "SELECT count(*) FROM metric.ingest_idempotency WHERE user_id = ?", Integer.class,
-                UUID.fromString(userId));
-        assertThat(stuck).isZero();
+        // Событие устойчиво: журнал IN_PROGRESS закрыт не был, payload ждёт в очереди.
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT status FROM metric.ingest_idempotency WHERE idempotency_key = ?",
+                String.class, key)).isEqualTo("IN_PROGRESS");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT payload FROM metric.ingest_outbox WHERE event_id = ?", String.class, eventId))
+                .contains("\"eventId\":\"" + eventId);
+
+        // Повтор того же ключа и тела — тот же eventId, новых записей нет, 409 нет.
+        mockMvc.perform(post("/users/" + userId + "/metrics")
+                        .header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(metric))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.eventId").value(eventId));
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM metric.ingest_outbox WHERE message_key = ?",
+                Integer.class, userId)).isEqualTo(1);
     }
 }

@@ -35,6 +35,9 @@ spring:
       acks: all
       properties:
         enable.idempotence: true
+        # При недоступном кластере отправка отказывает синхронно за 2 с, а не висит 60 с —
+        # отправитель outbox освобождается для следующей порции.
+        max.block.ms: ${PULSE_KAFKA_MAX_BLOCK_MS:2000}
   jackson:
     # События и API обмениваются людьми-читаемым JSON: даты строкой ISO-8601 (согласование п. 7).
     serialization:
@@ -58,6 +61,12 @@ pulse:
   max-points-per-request: 1000
   max-request-body-bytes: 1048576
   publish-ack-timeout: 5s
+  # Transactional outbox входящих пакетов (P0-2): 202 = запись в PostgreSQL-очередь,
+  # отправитель добирает события в Kafka; пауза повтора = poll-interval * 2^n.
+  outbox-poll-interval: ${PULSE_OUTBOX_POLL_INTERVAL:1s}
+  outbox-batch-size: ${PULSE_OUTBOX_BATCH_SIZE:100}
+  outbox-retention: ${PULSE_OUTBOX_RETENTION:7d}
+  idempotency-retention: ${PULSE_IDEMPOTENCY_RETENTION:30d}
 
 management:
   endpoints:
