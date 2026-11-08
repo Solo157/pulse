@@ -5,7 +5,8 @@ networks:
 
 services:
   # ============================================================================
-  # POSTGRESQL (single node, multi-schema) — DEMO SPOF, documented
+  # POSTGRESQL — одна база на весь стенд, схемы разделены по сервисам.
+  # Едиственный экземпляр: его отказ останавливает вход — ограничение DEMO, описано в result.md.
   # ============================================================================
   postgres:
     image: postgres:16
@@ -27,7 +28,8 @@ services:
       start_period: 10s
 
   # ============================================================================
-  # REDIS (API idempotency keys; keys also persisted to PostgreSQL)
+  # REDIS — развёрнут как задел под быстрый слой защиты ingest от повторов
+  # (ключи сейчас хранятся только в PostgreSQL, в коде Redis не задействован).
   # ============================================================================
   redis:
     image: redis:7-alpine
@@ -44,7 +46,7 @@ services:
       retries: 5
 
   # ============================================================================
-  # CLICKHOUSE (single node, no sharding; time-range partitioning)
+  # CLICKHOUSE — один узел, без шардов; таблица истории разложена по дням (PARTITION BY дата).
   # ============================================================================
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -71,10 +73,13 @@ services:
       start_period: 10s
 
   # ============================================================================
-  # KAFKA KRaft cluster (2 brokers + 1 controller-only node for 3-node quor)
-  # FT-8: stopping kafka1 → ISR=1 < minISR=2 → writes blocked ("not enough replicas")
-  #       kafka1 returns → ISR=2 → writes resume. Kafka not fully down (no data loss).
-  # RF=2, minISR=2, acks=all, enable.idempotence=true per §6.6.
+  # KAFKA: режим KRaft — 2 узла принимают запросы (broker) + участвуют в
+  # управлении, третий (kafka3) только голосует за управление кластером.
+  # Сценарий FT-8: отключение kafka1 → синхронных реплик становится 1 при минимуме 2
+  # → запись в Kafka блокируется с ошибкой "not enough replicas"; возврат kafka1 →
+  # запись продолжается, данные не теряются.
+  # У каждого сервиса-продюсера: две копии каждого топика (RF=2), подтверждение от обеих (minISR=2, acks=all),
+  # защита продюсера от дублей при ретраях (enable.idempotence) — по §6.6.
   # ============================================================================
   kafka1:
     image: apache/kafka:3.9.0
@@ -109,6 +114,31 @@ services:
       retries: 10
       start_period: 30s
 
+  # Разовый инициализатор: создаёт топики metrics/incidents по 2 партиции с двумя
+  # копиями (RF=2), повторный запуск безопасен. Без него Kafka создала бы тему
+  # автоматически с одной партицией, а на давно живущих кластерах копии могли бы
+  # разойтись с ожиданиями README.
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: kafka-init
+    restart: "no"
+    networks: [pulse]
+    depends_on:
+      kafka1: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    # Ретраи: переживаем окно, пока kafka2/kafka3 ещё не зарегистрировались
+    # (healthcheck определён только на kafka1), и ждём минимум 2 живых брокера.
+    command:
+      - >
+        until [ $$(/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server
+        kafka1:9092 2>/dev/null | grep -c "kafka[0-9]:9092") -ge 2 ]; do sleep 2; done;
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka1:9092
+        --create --if-not-exists --topic metrics --partitions 2 --replication-factor 2
+        --config min.insync.replicas=2 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka1:9092
+        --create --if-not-exists --topic incidents --partitions 2 --replication-factor 2
+        --config min.insync.replicas=2
+
   kafka2:
     image: apache/kafka:3.9.0
     container_name: kafka2
@@ -132,7 +162,7 @@ services:
       KAFKA_MIN_INSYNC_REPLICAS: 2
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 2
-      KAFKA_LOG_DIRS: \/var\/lib\/kafka\/data
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 | grep -q ApiVersions"]
@@ -145,8 +175,8 @@ services:
     container_name: kafka3
     restart: unless-stopped
     networks: [pulse]
-    # controller-only, no broker listener
-    # (controller advertises only the CONTROLLER listener address)
+    # Узел только для управления кластером (controller): клиентских портов нет,
+    # данных метрик не хранит — нужен, чтобы голосование контроллеров было устойчивым.
     volumes:
       - kafka3_data:/var/lib/kafka/data
     environment:
@@ -160,7 +190,8 @@ services:
       KAFKA_LOG_DIRS: /var/lib/kafka/data
 
   # ============================================================================
-  # NGINX (single Gateway, reverse proxy + least_conn balancing to metric-service)
+  # NGINX (единственная точка входа: обратный прокси на metric-service,
+  # раскладка запросов по репликам через DNS Docker)
   # ============================================================================
   nginx:
     image: nginx:1.27-alpine

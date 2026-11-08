@@ -1,5 +1,6 @@
 package com.pulse.metric.config;
 
+import com.zaxxer.hikari.HikariDataSource;
 import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -16,7 +17,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public class ClickHouseConfig {
 
     // Собственные бины DataSource выключают автоконфигурацию DataSourceAutoConfiguration
-    // (она @ConditionalOnMissingBean), поэтому PostgreSQL-источник объявлен явно иPrimary.
+    // (она @ConditionalOnMissingBean), поэтому PostgreSQL-источник объявлен явно и с @Primary.
+    // Таймауты пула связываются @ConfigurationProperties напрямую с HikariDataSource —
+    // без этого spring.*.hikari.* в yml осталась бы мёртвой строкой.
     @Bean
     @Primary
     @ConfigurationProperties("spring.datasource")
@@ -26,8 +29,10 @@ public class ClickHouseConfig {
 
     @Bean
     @Primary
+    @ConfigurationProperties("spring.datasource.hikari")
     public DataSource dataSource() {
-        return postgresDataSourceProperties().initializeDataSourceBuilder().build();
+        return postgresDataSourceProperties().initializeDataSourceBuilder()
+                .type(HikariDataSource.class).build();
     }
 
     /** Свойства второго (ClickHouse) источника из {@code spring.clickhouse.*}. */
@@ -37,10 +42,12 @@ public class ClickHouseConfig {
         return new DataSourceProperties();
     }
 
-    /** DataSource истории метрик (ClickHouse). */
+    /** DataSource истории метрик (ClickHouse), таймауты пула — из spring.clickhouse.hikari.*. */
     @Bean
+    @ConfigurationProperties("spring.clickhouse.hikari")
     public DataSource clickhouseDataSource() {
-        return clickhouseDataSourceProperties().initializeDataSourceBuilder().build();
+        return clickhouseDataSourceProperties().initializeDataSourceBuilder()
+                .type(HikariDataSource.class).build();
     }
 
     /** JdbcTemplate для чтения истории метрик. */

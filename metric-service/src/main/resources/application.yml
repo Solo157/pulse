@@ -5,6 +5,9 @@ spring:
   application:
     name: pulse-metric-service
   datasource:
+    # Таймауты связываются напрямую с HikariDataSource (ClickHouseConfig, @ConfigurationProperties):
+    # собственные бины DataSource отключают автоконфигурацию. 3 с > connectTimeout=2 URL,
+    # чтобы соединение падало на драйвере, а не на ожидании пула.
     hikari:
       connection-timeout: 3000
       validation-timeout: 2000
@@ -17,7 +20,8 @@ spring:
       schema-locations: classpath:db/schema.sql
   # Read API: второй источник — ClickHouse с историей метрик (пишет storage-service).
   clickhouse:
-    connection-timeout: 3000
+    hikari:
+      connection-timeout: 3000
     url: ${PULSE_CLICKHOUSE_URL:jdbc:clickhouse://localhost:8123/pulse?connect_timeout=2000&socket_timeout=10000}
     username: ${PULSE_CLICKHOUSE_USER:pulse}
     password: ${PULSE_CLICKHOUSE_PASSWORD:change-me}

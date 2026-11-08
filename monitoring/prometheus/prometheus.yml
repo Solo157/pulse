@@ -2,8 +2,9 @@ global:
   scrape_interval: 10s
   evaluation_interval: 10s
 
-# DNS-based discovery keeps Prometheus scraping scaled service replicas without reload.
-# Each service exposes its management port from application.yml (defaults 8080..8083).
+# Обнаружение целей через DNS Docker: новые реплики сервисов (при масштабировании)
+# попадают в сбор метрик сами, перезапуск Prometheus не нужен.
+# У каждого сервиса свой порт из application.yml (по умолчанию 8080..8083).
 scrape_configs:
   - job_name: metric-service
     metrics_path: /actuator/prometheus
