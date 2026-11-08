@@ -124,6 +124,22 @@ nginx `proxy_next_upstream ... non_idempotent`.
   (включая прежний набор), полный реактор — зелёный. Метрики:
   `pulse.ingest.outbox.*` (`docs/decisions.md`).
 
+- **P0-3 — измерение нагрузки в точках метрик вместо запросов. Закрыто.**
+  `loadgen.py` переписан: `LOAD_BATCH_SIZE` точек в payload, цель
+  `LOAD_TARGET_POINTS_PER_SEC` (HTTP RPS выводится строго target/batch),
+  offered/accepted/подтверждённые персистентность раздельны; ограниченная
+  очередь работ с high-water mark и `dropped_jobs`, `join()` до фактической
+  отправки; стабильный Idempotency-Key на batch и его retry; проверочные
+  команды (`LOAD_CH_COUNT_CMD`/`LOAD_KAFKA_LAG_CMD`) с обязательной проверкой
+  кода возврата. Ступень 20k→40k→60k точек/с (batch=100): ingest и Kafka
+  принимают **60 000 точек/с** без ошибок (p99 84 мс, 0 потерь); сквозная
+  персистентность ограничена потребителями — ClickHouse дозаписан ≈ за 9 минут
+  (storage ≈6.5k точек/с), очередь processing разобрана ≈ за 36 минут
+  (≈3–3.5k точек/с); финальный COUNT ровно 7 200 000 = принято (ни потерь,
+  ни дублей). Заявка «20k/60k точек/с» подтверждена только для приёма;
+  для сквозных значений нужно масштабирование storage/processing
+  (`docs/results-et7.md`, `docs/decisions.md`).
+
 ## Runbook
 
 ```bash
