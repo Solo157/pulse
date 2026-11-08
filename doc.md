@@ -185,7 +185,9 @@ compose задаёт только адреса (`SPRING_DATASOURCE_URL`, `PULSE_
 
 ### Инфраструктура (docker-compose)
 
-- Kafka: 3 брокера KRaft, `REPLICATION_FACTOR/OFFSETS/TRANSACTION_STATE=2`,
+- Kafka: KRaft — `kafka1`,`kafka2` брокеры (хранят копии топиков), `kafka3`
+  controller-only (данных метрик не хранит);
+  `REPLICATION_FACTOR/OFFSETS/TRANSACTION_STATE=2`,
   `MIN_INSYNC_REPLICAS=2`; одноразовый `kafka-init` идемпотентно создаёт
   `metrics`/`incidents` (2 партиции, RF=2, minISR=2) — без него auto-create даёт 1 партицию.
 - nginx: `resolver 127.0.0.11 valid=1s`, `proxy_read_timeout 60s`, JSON-ошибки 503.
