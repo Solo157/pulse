@@ -8,7 +8,7 @@
 #                         docker kill --signal=KILL $(docker compose ps -q metric-service | tail -1)
 #   F2 storage-stop     : docker compose stop storage-service  (LAG storage-group растёт)
 #                         docker compose start storage-service (LAG -> 0)
-#   F3 processing-stop  : аналогично, --group processing-metrics
+#   F3 processing-stop  : аналогично, --group processing-group
 #   F4 notification-stop: docker compose stop notification-service; шлём метрики > порога;
 #                         LAG notification-group растёт -> start -> инциденты/SENT в PG
 #   F5 clickhouse-stop  : GET /metrics деградирует, ingest 202, LAG storage-group -> дренаж

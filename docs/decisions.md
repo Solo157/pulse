@@ -91,10 +91,11 @@
 - Read-запросы (`UserReadService.getHistory/getIncidents`) защищены связкой
   **resilience4j TimeLimiter + CircuitBreaker** (цепи `chRead`/`pgRead`, конфиг в
   `application.yml`): зависшая выборка принудительно обрывается по таймауту (3 с),
-  сбои копятся в блокере, открытая цепь мгновенно отвечает `DataUnavailableException`
-  → 503 RFC 7807; half-open проверяет восстановление (`automatic-transition`).
-  Метрики `resilience4j_circuitbreaker_*` на `/actuator/prometheus` (панель в Grafana — из списка
-  бэклога).
+  сбои накапливаются в статистике выключателя; взведённый выключатель мгновенно
+  отвечает `DataUnavailableException` → 503 RFC 7807; периодические пробы
+  (half-open) проверяют восстановление (`automatic-transition`).
+  Метрики `resilience4j_circuitbreaker_*` доступны на `/actuator/prometheus`
+  (отдельная панель в Grafana — отложена, см. план развития в `result.md`).
 - **Почему программно, а не аннотациями**: `@TimeLimiter` оборачивает уже вычисленный
   `CompletableFuture`, а блокирующий JDBC-вызов к моменту возврата из метода уже
   выполнен на потоке запроса (проверено смоуком: 30 с сохранялись). Выборка выполняется

@@ -1,5 +1,6 @@
--- PostgreSQL single-database, multi-schema per service (§ schema separation)
--- metric-service owns: users, metrics, rules, incidents, idempotency
--- notification-service owns: notification
+-- Одна база PostgreSQL на весь стенд, но у каждого сервиса своя схема —
+-- таблицы сервисов не пересекаются (см. согласование по разделению схем).
+-- Схема metric принадлежит метрик-контуру: пользователи, правила, инциденты,
+-- ключи защиты от повторной отправки; схема notification — уведомлениям.
 CREATE SCHEMA IF NOT EXISTS metric;
 CREATE SCHEMA IF NOT EXISTS notification;

@@ -9,8 +9,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 /**
- * История метрик (Этап 5, FR-4): читает pulse.metric_points из ClickHouse,
- * дедуплицируя повторную доставку Kafka через FINAL (ENGINE = ReplacingMergeTree).
+ * История метрик (Этап 5, FR-4): читает pulse.metric_points из ClickHouse.
+ * Если Kafka повторно отдала то же событие и точка записалась дважды, повтор
+ * убирает движок таблицы: SELECT выполняется с FINAL (ENGINE = ReplacingMergeTree).
  */
 @Repository
 public class MetricHistoryRepository {

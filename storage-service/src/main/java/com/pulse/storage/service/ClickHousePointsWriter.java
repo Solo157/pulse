@@ -12,9 +12,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 /**
- * Пакетная запись точек в ClickHouse (раздел 6.3). Дедупликация — на стороне
- * движка ReplacingMergeTree (eventId включён в ORDER BY), поэтому повторная
- * доставка Kafka безопасна (согласование п. 8).
+ * Пакетная запись точек в ClickHouse (раздел 6.3). Повторная доставка того же
+ * события Kafka безопасна: идентификатор события входит в ключ сортировки,
+ * и движок таблицы сам убирает одинаковые строки (согласование п. 8).
  */
 @Service
 public class ClickHousePointsWriter {

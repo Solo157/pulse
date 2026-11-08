@@ -1,57 +1,68 @@
 # Pulse — учебное DEMO событие-ориентированного мониторинга
 
-Высоконагружаемый приём метрик с последующим обнаружением инцидентов по пороговым
-правилам и доставкой уведомлений. Реализация по плану `implementation.md`
-(статусы этапов — там же, решения — в `docs/decisions.md`).
+Приём больших пакетов метрик, поиск инцидентов по пороговым правилам и доставка
+уведомлений. Полное техническое описание (устройство, все настройки) — `doc.md`;
+итоги, находки и порядок действий — `result.md`; план и решения —
+`implementation.md`, `docs/decisions.md`.
 
 ## Архитектура
 
 ```
 client ──> nginx :80 ──> metric-service ──> Kafka [metrics] ──> storage-service ──> ClickHouse
-                                 │
-                                 └──> Kafka ──> processing-service ──> [incidents] ──> notification-service ──> ДЕМО-канал (self HTTP)
-                                                  │                                        │
-                                            PostgreSQL ────────────────────────────> PostgreSQL
-                                          (метрики: users, правила, инциденты, состояния)   (metric.notifications)
+                                 │                   │
+                    PostgreSQL ◄─┤                   └──> processing-service ──> [incidents]
+               (пользователи,    │                            │                     │
+                правила,         └── чтение: история и        ▼                     ▼
+                инциденты,       инциденты владельцу      PostgreSQL ◄── notification-service
+                уведомления)     (ClickHouse + PostgreSQL)  (инциденты)   └─> ДЕМО-канал (HTTP на себя)
 ```
 
-| Компонент | Роль | Порт (внутр.) |
+| Компонент | Роль | Порт (внутри сети) |
 |---|---|---|
 | `nginx` | единственная точка входа клиентов | `:80` на хосте |
-| `metric-service` | регистрация, batch ingest (`202` после подтверждения Kafka) | 8080 |
-| `storage-service` | consumer `metrics` → ClickHouse | 8081 |
-| `processing-service` | consumer метрик, пороги/инциденты, publishes `incidents` | 8082 |
-| `notification-service` | consumer `incidents`, доставка + статусы в БД | 8083 |
-| `kafka1..3` | KRaft, replication factor 2 для топиков приложений | 9092 |
+| `metric-service` | регистрация, приём пакетов метрик (код `202` только после подтверждения Kafka), выдача истории владельцу | 8080 |
+| `storage-service` | читает топик `metrics` и пишет точки в ClickHouse | 8081 |
+| `processing-service` | читает `metrics`, сравнивает с порогами, заводит инциденты, публикует топик `incidents` | 8082 |
+| `notification-service` | читает `incidents`, доставляет уведомление и записывает результат в базу | 8083 |
+| `kafka1`, `kafka2` | узлы Kafka, принимающие запросы; каждая копия топика хранится на двух узлах | 9092 |
+| `kafka3` | узел только для управления кластером (данных метрик не хранит) | — |
 | `postgres` | пользователи, правила, инциденты, состояния, уведомления | 5432 |
 | `clickhouse` | история метрик | 8123 |
+| `redis` | задел под будущие задачи; в текущем коде не используется | 6379 |
+| `prometheus`, `grafana` | сбор метрик сервисов и готовые графики (профиль `obs`) | 9090 / 3000 |
 
 ## Требования
 
-- Docker + Docker Compose v2.
-- JDK 21 и Maven 3.9 — только для сборки/тестов (образы Services собирает Docker из
-  уже собранных jar либо multi-stage; для быстрых прогонов тестов нужен локальный JDK).
+- Docker и Docker Compose v2.
+- JDK 21 и Maven 3.9 — нужны только для сборки и тестов. Образы сервисов просто
+  копируют уже собранные jar-файлы.
 
 ## Быстрый старт
 
+Этот раздел (и раздел «Как пользоваться» ниже) — основное описание, как запускать
+и настраивать приложение.
+
 ```bash
-# 1. Собрать все модули (тесты: unit + интеграционные, нужен Docker для Testcontainers)
+# 1. Собрать все модули и прогнать тесты (интеграционным тестам нужен Docker)
 mvn clean install
 
-# 2. Поднять инфраструктуру и приложение
+# 2. Поднять весь стенд: базы, Kafka, сервисы, nginx.
+#    Одноразовый контейнер kafka-init сам создаст топики metrics и incidents
+#    (по 2 партиции, две копии каждой). Повторный запуск безопасен.
 docker compose up -d
 
-# 3. Дождаться healthy-статусов
+# 3. Дождаться состояния healthy у всех контейнеров
 docker compose ps
 ```
 
-> Ограничение рабочей среды: если Maven не доверяет центру Maven-репозитория (repo.maven.apache.org)
-> (MITM proxy), задавайте truststore:
+> Если Maven в вашей среде не доверяет сертификату центрального репозитория
+> (трафик перехватывает промежуточный прокси), укажите хранилище доверенных
+> сертификатов:
 > `export MAVEN_OPTS="-Djavax.net.ssl.trustStore=$HOME/m2-truststore.jks -Djavax.net.ssl.trustStorePassword=changeit"`.
 
 ## Как пользоваться (сквозной сценарий)
 
-Пороговое правило `temperature > 80` (`temperature-high`) засеяно при старте.
+Правило `temperature > 80` (`temperature-high`) создаётся при старте.
 
 ```bash
 # 1) Регистрация пользователя (пароль не короче 8 символов) → вернёт {"userId": "..."}
@@ -59,152 +70,165 @@ curl -s -X POST localhost/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"email":"demo@pulse.dev","password":"***"}'
 
-# 2) Пакет метрик (Idempotency-Key обязателен; повтор ключа не создаёт второй batch)
+# 2) Пакет метрик. Заголовок Idempotency-Key обязателен: если отправить пакет
+#    с тем же ключом второй раз, второй приём не произойдёт — вернётся тот же ответ.
 curl -s -X POST localhost/users/<userId>/metrics \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen)" \
   -d '{"metrics":[{"name":"temperature","value":85.0,"timestamp":"2026-11-06T10:00:00Z"}]}'
 # → 202 {"eventId":"...","userId":"...","acceptedCount":1}
 
-# 3) Значение выше порога → ProcessingService откроет инцидент
+# 3) Значение выше порога → processing-service откроет инцидент
 docker compose exec -T postgres psql -U pulse -d pulse -c \
   "SELECT id, status, opened_at, closed_at FROM metric.incidents ORDER BY opened_at DESC LIMIT 5"
 
-# 4) NotificationService создаст уведомление и доставит его в ДЕМО-канал
-#    (HTTP POST на собственный endpoint /internal/demo-receiver)
+# 4) notification-service создаст уведомление и доставит его в ДЕМО-канал
+#    (HTTP-запрос на собственный адрес /internal/demo-receiver)
 docker compose exec -T postgres psql -U pulse -d pulse -c \
   "SELECT source_event_id, status, destination, attempts FROM metric.notifications ORDER BY created_at DESC LIMIT 5"
 docker compose logs notification-service --tail 20 | grep -i "ДЕМО-канал\|доставлено"
 
-# 5) «Выздоровление» — значение ниже порога закроет инцидент (close-событие,
-#    уведомление при этом НЕ создаётся)
+# 5) «Выздоровление» — значение ниже порога закроет инцидент
+#    (уведомление при закрытии НЕ создаётся)
 curl -s -X POST localhost/users/<userId>/metrics \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen)" \
   -d '{"metrics":[{"name":"temperature","value":20.0,"timestamp":"2026-11-06T11:00:00Z"}]}'
 ```
 
-История метрик пишется в ClickHouse (`storage-service` consumer):
+История метрик лежит в ClickHouse — её пишет `storage-service`:
 
 ```bash
-set -a && . .env   # креды из .env
+set -a && . .env   # учётные данные из .env
 curl -s --data-binary \
   "SELECT metricName, value, timestamp FROM pulse.metric_points WHERE userId='<userId>' ORDER BY timestamp DESC LIMIT 10" \
   "http://localhost:8123/?user=$CLICKHOUSE_USER&password=$CLICKHOUSE_PASSWORD"
 ```
 
-## Чтение истории (read API)
+## Чтение своей истории (read API)
 
-Данные читает только владелец: Basic-аутентификация, где логин — `userId`, пароль —
-пароль регистрации (минимум 8 символов). Чужой `userId` в пути — `403`, отсутствие или
-ошибка учётных данных — `401`.
+Данные видны только владельцу: Basic-аутентификация, где логин — `userId`,
+пароль — пароль регистрации. Чужой `userId` в пути — `403`, нет или неверны
+учётные данные — `401`.
 
 ```bash
-# История метрик (ClickHouse): опции metric, from, to, limit (default 100, max 1000)
-curl -s "localhost/users/<userId>/metrics?metric=temperature&limit=10"   -u "<userId>:<пароль-регистрации>"
+# История метрик (из ClickHouse): параметры metric, from, to, limit (по умолчанию 100, максимум 1000)
+curl -s "localhost/users/<userId>/metrics?metric=temperature&limit=10" -u "<userId>:<пароль-регистрации>"
 # [{"name":"temperature","value":85.0,"timestamp":"2026-11-06T10:00:00Z"}, ...]
 
-# Инциденты (PostgreSQL)
+# Инциденты (из PostgreSQL)
 curl -s "localhost/users/<userId>/incidents" -u "<userId>:<пароль-регистрации>"
 # [{"userId":"...","ruleId":"temperature-high","status":"OPEN","value":85.0,...}]
 ```
 
-Приём метрик (`POST /users/{userId}/metrics`) остаётся публичным по идентификатору —
-по согласованию ДЕМО API-ключ для ingest не используется.
+Приём метрик (`POST /users/{userId}/metrics`) по согласованию для ДЕМО не
+требует ключа доступа — только корректный `userId` в пути.
 
-## Целевая система (архитектура, ресурсы, точки масштабирования)
+## Состав системы и точки роста
 
-Моно-стенд поднят `docker compose`; это уменьшенная, но функционально полная
-мишень будущего скейла.
+Моно-стенд поднят одной командой `docker compose`; это уменьшенная, но
+функционально полная модель будущей распределённой системы. Все четыре сервиса
+не хранят состояние у себя (stateless) — всё состояние в базах и Kafka, поэтому
+любой сервис можно запускать в нескольких копиях.
 
-### Микросервисы (Spring Boot 3.5 / Java 21, все stateless)
+### Микросервисы (Spring Boot 3.5 / Java 21)
 
-| Сервис | Роль | Входы / выходы | Реплицируется |
+| Сервис | Роль | Связи | Копирование |
 |---|---|---|---|
-| **nginx 1.27** | входная точка `:80`, round-robin по A-записям DNS (`resolver valid=1s`), `proxy_next_upstream error timeout http_502/503`, request-id сквозной | клиентский HTTP → `metric-service:8080` | да (stateless) |
-| **metric-service** | регистрация, приём метрик (idempotency), аутентификация ingest и read-API (Basic, BCrypt), история/инциденты владельцу | HTTP `POST /users/{id}/metrics`, read API; продюсер топика `metrics`; читает PostgreSQL, ClickHouse | `--scale` |
-| **storage-service** |consumer пакета `metrics` → идемпотентно пишет `ClickHouse pulse.metric_points` | Kafka `metrics` (batch listener, 500/опрос, ack-mode batch) | `--scale` (потолок = партиции топика) |
-| **processing-service** | потребитель `metrics`: правила/пороги → инциденты в PostgreSQL + событие в топик `incidents` | Kafka `metrics` → `incidents`; PostgreSQL | `--scale` (потолок = партиции `metrics`) |
-| **notification-service** | потребитель `incidents` → внешняя доставка (webhook-заглушка), статусы SENT/FAILED, идемпотентность | Kafka `incidents`; PostgreSQL | `--scale` (потолок = партиции `incidents`) |
+| **nginx 1.27** | входная точка `:80`; на каждый запрос заново узнаёт адреса `metric-service` через DNS Docker (обновление раз в секунду), при ошибке/таймауте повторяет запрос на другой адрес; сквозной идентификатор запроса | клиентский HTTP → `metric-service:8080` | можно несколько, но DEMO — один |
+| **metric-service** | регистрация, приём пакетов с защитой от повторной отправки, проверка владельца при чтении, выдача истории и инцидентов | HTTP; публикация в `metrics`; читает PostgreSQL и ClickHouse | `--scale` |
+| **storage-service** | читает `metrics` пачками (до 500 событий за раз) и пишет их в ClickHouse одним запросом; продолжение с того же места после сбоя | Kafka `metrics`; ClickHouse | `--scale` (не больше числа партиций) |
+| **processing-service** | читает `metrics`, по правилам определяет открытие/закрытие инцидентов, пишет их в PostgreSQL и публикует в `incidents` | Kafka `metrics` → `incidents`; PostgreSQL | `--scale` (не больше партиций `metrics`) |
+| **notification-service** | читает `incidents`, доставляет уведомление с повторными попытками, записывает итог (`SENT`/`FAILED`) | Kafka `incidents`; PostgreSQL | `--scale` (не больше партиций `incidents`) |
 
 ### Хранилища
 
-- **PostgreSQL 16** (`postgres:16`, сеть compose) — транзакционный слой, схема `metric`:
-  `users` (пароли BCrypt), `idempotency` (+ продублирован Redis-ключом), `rules`, `incidents`,
-  учётные таблицы сервисов. Точка роста: вертикально + read-реплики.
-- **ClickHouse 24.8** (`clickhouse-server`) — временной слой, таблица `pulse.metric_points`,
-  `ReplacingMergeTree(insertedAt) ORDER BY (userId, metricName, timestamp, eventId)`
-  (дедуп по eventId на read). Растёт шардированием/репликами.
-- **Redis 7** (`appendonly yes`) — задел под быстрый слой идемпотентности; в текущем коде
-  не задействован (ключи живут в PostgreSQL).
+- **PostgreSQL 16** — рабочая база, схема `metric`: `users` (пароли в виде
+  BCrypt-хешей), `ingest_idempotency` (ключи защиты от повторной отправки),
+  `monitoring_rules` (пороги), `incident_state` и `incidents`,
+  `notification.notifications` (статусы доставки). Рост: больше ресурсов и
+  реплика для чтения.
+- **ClickHouse 24.8** — история метрик, таблица `pulse.metric_points`, движок
+  `ReplacingMergeTree`: метка события входит в ключ сортировки, поэтому
+  повторная запись той же точки не размножает данные при чтении.
+  Рост: шарды и реплики.
+- **Redis 7** — развёрнут про запас, под ускорение защиты от повторов; текущий
+  код его не трогает (ключи лежат в PostgreSQL).
 
-### Kafka 3.9 (KRaft, без ZooKeeper)
+### Kafka 3.9 (режим KRaft, без ZooKeeper)
 
-- 3 брокера; **топики**: `metrics` (2 партиции, RF 2, `min.insync.replicas=2`,
-  key = `userId` — порядок точек пользователя в одной партиции), `incidents`
-  (1 партиция, RF 2, `min.insync.replicas=2`).
-- **Продюсеры**: `acks=all` + `enable.idempotence=true` (ни потерь, ни дублей при повторах),
-  `linger`/батч по дефолтам, publish-ack-timeout 5 s.
-- **Консьюмеры**: `auto-offset-reset=earliest`, `max.poll.interval.ms=120000`,
-  batch + ack-mode `batch` (commit после успешной записи), consumer-id стабильны через
-  `metric-group/storage-group/processing-metrics/notification...` группы.
-- **Что это значит для скейла/нагрузки**: потребительские группы линейно масштабируются
-  только до числа партиций (2 для `metrics`), дальше — только вертикально или ре-партиционированием
-  топика; RF2+min.insync2 = аптайм при отказе 1 брокера, но потеря обеих брокеров из пары
-  реплик = остановка записи (ошибка `NOT_ENOUGH_REPLICAS`); для продакшена — RF≥3,
-  `min.insync.replicas=2`, больше партиций, отдельный cluster для Kafka.
+- Два узла принимают запросы и хранят данные; третий участвует только в
+  управлении кластером. **Топики** создаёт контейнер `kafka-init`:
+  `metrics` и `incidents` — по 2 партиции, по 2 копии, подтверждение записи
+  требуется от обеих копий (`min.insync.replicas=2`). Ключ сообщения — `userId`,
+  поэтому точки одного пользователя идут по одной партиции по порядку.
+- **Отправка**: ожидание подтверждения от всех копий (`acks=all`) плюс защита
+  от появления дублей при повторных попытках (`enable.idempotence=true`).
+- **Чтение**: с самого начала (`auto-offset-reset=earliest`), пачками, отметку о
+  прочитанном сервис сдвигает только после успешной записи; при сбое повторит
+  обработку пачки. Имена групп: `storage-group`, `processing-group`,
+  `notification-group` (стабильные — после перезапуска сервис продолжает с
+  своего места).
+- **Что из этого следует для нагрузки и отказов**: число обработчиков топика
+  растёт только до числа партиций (для `metrics` — две), дальше помогает только
+  добавление партиций или более мощные узлы. Две copies + подтверждение от обеих
+  означают: падение одного узла Kafka система переживает молча, но потеря обеих
+  копий одного топика останавливает запись (ошибка `NOT_ENOUGH_REPLICAS`).
+  Для боевого окружения: три и более копии, больше партиций, отдельный
+  кластер Kafka.
 
-### Настройки стенда (env `.env` / compose)
+### Настройки стенда (файл `.env`)
 
-`POSTGRES_*`, `CLICKHOUSE_*`, `KAFKA_*` (RF, репликация offset-топика), креды Grafana
-`GF_ADMIN_*`. Порты: nginx `:80`, Prometheus `:9090`, Grafana `:3000`, БД внутри сети `pulse`.
-Микросервисы слушают 8080 (metric), 8081/8082/8083 (storage/processing/notification);
-Prometheus — dns_sd по этим портам, без рестарта при `--scale`.
+`.env` содержит только то, что реально подставляется в `docker-compose.yml`:
+`POSTGRES_*`, `CLICKHOUSE_*`, учётные данные Grafana `GF_ADMIN_*`. Остальные
+настройки — переменные с понятными именами внутри `application.yml` каждого
+сервиса, полностью они перечислены в `doc.md`, раздел 6. Порты: nginx `:80`,
+Prometheus `:9090`, Grafana `:3000`; сервисы слушают 8080–8083 внутри сети
+стенда.
 
-### Наблюдаемые SLI (Grafana `pulse-overview`)
+### Что показывают графики (Grafana, дашборд `pulse-overview`)
 
-Бизнес: принятые/отклонённые метрики (по `outcome`), реплеи по idempotency, ошибки
-публикации, точки, записанные в CH, обработанные processing-ом, уведомления SENT/FAILED.
-Система: p95 латентность HTTP, heap/CPU реплик, uptime. Лаги Kafka — consumer-groups CLI
-(штатный экспортёр лагов ещё не поднят — кандидат Этапа 9).
+По работе системы: сколько метрик принято и отклонено, сколько пакетов
+повторно прислали по тому же ключу, ошибки публикации, записи в ClickHouse,
+обработанные инциденты, отправленные и испорченные уведомления.
+По машинам: время ответа HTTP (p95), память и CPU каждого сервиса, время
+работы. Лаги Kafka штатным средством не собираются — их смотрят консольной
+утилитой `kafka-consumer-groups.sh` (вынести в Prometheus — кандидат развития).
 
-## Масштабирование (для demos по нагрузке, Этап 7)
-
-Stateless-сервисы масштабятся репликами (Kafka-группы распределяют партиции):
+## Копирование сервисов под нагрузкой
 
 ```bash
 docker compose up -d --scale metric-service=3 --scale storage-service=2
 ```
 
-Замеры и методика нагрузочных прогонов: `docs/results-et7.md`; воспроизведение:
-`./loadgen.py` (профили `baseline` / `step` / `burst`). Отказоустойчивость
-(fault injection): `docs/fault-injection.md`, шаги сценариев — `scripts/chaos.sh`.
+Kafka сама распределит партиции между читателями; nginx начнёт слать запросы
+на новые копии `metric-service` без перезагрузки. Замеры и методика нагрузочных
+прогонов — `docs/results-et7.md`; генератор нагрузки — `./loadgen.py`
+(профили `baseline` / `step` / `burst`). Сценарии отказов и их результаты —
+`docs/fault-injection.md`, шаги воспроизведения — `scripts/chaos.sh`.
 
-## Профили и окружение
-
-- `.env` / `.env.example` — креды и настройки PostgreSQL/ClickHouse; compose подхватывает
-  их автоматически (`.env.example` переименуйте в `.env` при нестандартных значениях).
-- `docker compose --profile obs up -d` — поднимает observability-стек (Prometheus/Grafana).
-- Prometheus: <http://localhost:9090> (targets — все 4 сервиса, `/actuator/prometheus`,
-  discovery по DNS — реплики подхватываются без рестарта, порты 8080..8083).
-- Grafana: <http://localhost:3000> (`GF_ADMIN_USER`/`GF_ADMIN_PASSWORD` из `.env`), папка
-  **Pulse** → дашборд `pulse-overview`: бизнес-показатели (ingest/Kafka/storage/
-  processing/notifications) и системные (HTTP latency p95, heap, CPU, uptime).
-
-## Тесты и проверка
+## Мониторинг (профиль obs)
 
 ```bash
-mvn clean install           # все модули: unit + интеграционные (Testcontainers)
+docker compose --profile obs up -d
 ```
 
-Интеграционные тесты поднятия compose не требуют; им нужен только Docker.
+- Prometheus: <http://localhost:9090> — собирает `/actuator/prometheus` со всех
+  четырёх сервисов; новые копии сервисов находятся через DNS Docker сами.
+- Grafana: <http://localhost:3000> (вход из `.env`), папка **Pulse** →
+  дашборд `pulse-overview`.
 
-Полный сброс стенда с чистыми данными (тома Kafka/PostgreSQL/ClickHouse):
-`docker compose --profile obs down -v` (проверено воспроизводимym стартом).
+## Тесты и полная проверка
 
-## Статус работ
+```bash
+mvn clean install           # все модули: модульные + интеграционные тесты (Testcontainers)
+```
 
-Реализованы Этапы 0–9 плана `implementation.md` (ingest, storage, инциденты,
-уведомления со статусами SENT/FAILED и идемпотентностью, read API с проверкой
-владельца, observability: метрики микросервисов в Prometheus + дашборд в Grafana,
-нагрузочные прогоны и масштабирование — см. `docs/results-et7.md`, fault injection —
-`docs/fault-injection.md`, финализация с итоговым прогоном с чистого состояния:
-`result.md` (итог, находки, бэклог, runbook).
+Поднимать compose для тестов не нужно, нужен только Docker. Полный сброс
+стенда с чистыми данными: `docker compose --profile obs down -v`, затем
+`docker compose up -d` — сценарий выше повторяется без ручных шагов.
+
+## Итог работ
+
+Реализованы этапы 0–9 плана `implementation.md`: приём, хранение, инциденты,
+уведомления со статусами, выдача истории владельцу, мониторинг, прогоны
+нагрузки и отказов. Итоговая проверка с чистого состояния, находки и план
+развития — `result.md`.

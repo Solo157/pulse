@@ -4,7 +4,7 @@
 Idempotency-Key на пакет) бьёт `POST /users/{id}/metrics` через nginx. Профили:
 `baseline` (плоский RPS), `step` (ступени), `burst` (пик). Метрики стека —
 Prometheus (`pulse_*` счётчики), проверка отсутствия потерь — COUNT по ClickHouse,
-лаг — `kafka-consumer-groups.sh` (LAG по группам `storage-group`, `processing-metrics`).
+лаг — `kafka-consumer-groups.sh` (LAG по группам `storage-group`, `processing-group`).
 Стенд: один хост (16 CPU / 31 ГБ), все контейнерыcompose вместе с  генератором,
 Kafka 3 брокера / 2 партиции топика `metrics`, PostgreSQL/ClickHouse без лимитов.
 

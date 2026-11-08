@@ -1,7 +1,10 @@
--- Схема ClickHouse для MetricService-потока (раздел 6.8).
--- Дедупликация повторной доставки Kafka ("вариант B", согласование п. 8):
--- eventId входит в ORDER BY, поэтому повторная вставка тех же точек схлопывается
--- движком ReplacingMergeTree; читается через FINAL (+ очистка OPTIMIZE позже).
+-- История метрик (раздел 6.8): пишет её storage-service, читает read API
+-- metric-service. Kafka умеет отдать то же событие повторно, поэтому обработка
+-- повторов — «вариант B» (согласование п. 8): идентификатор события eventId
+-- входит в ключ сортировки (ORDER BY), а движок таблицы ReplacingMergeTree
+-- сам убирает одинаковые строки при фоновом слиянии. Чтобы и до слияния
+-- читалось по одному разу, в SELECT добавляют ключевое слово FINAL.
+-- (Тот же текст — в storage-service/src/main/resources/db/schema.sql.)
 
 CREATE TABLE IF NOT EXISTS pulse.metric_points (
     userId       UUID,
