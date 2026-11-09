@@ -59,6 +59,7 @@ management:
       percentiles-histogram:
         pulse.event.age: true
         pulse.e2e.notification.sent: true
+        pulse.notification.delivery.duration: true
     tags:
       application: ${spring.application.name}
       instance: ${INSTANCE_ID:${HOSTNAME:${spring.application.name}}}

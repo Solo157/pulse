@@ -26,8 +26,21 @@ import org.springframework.stereotype.Service;
  * статус ({@code SENT}/{@code FAILED}) всегда зафиксирован в БД, это и есть
  * проверяемый этап доставки.</p>
  *
- * <p>Гистограмма {@code pulse.e2e.notification.sent} — от публикации события
- * инцидента (createdAt) до подтверждения доставки (SENT).</p>
+ * <p>Семантика статусов (осознанное ограничение DEMO): {@code FAILED} терминален —
+ * повторное событие Kafka не инициирует новую доставку, потому что
+ * {@code source_event_id} уже claimed. Строка, оставшаяся {@code DELIVERING}
+ * из-за гибели процесса между claim и finish, тоже больше не доставляется;
+ * её видно по метрике возраста старейшей незавершённой доставки. Контролируемый
+ * повторный запуск доставки ({@code FAILED} → повтор) в DEMO не реализован и
+ * вынесен владельцу (docs/decisions.md).</p>
+ *
+ * <p>Метрики: {@code pulse.notification.attempts} — попытки доставки;
+ * {@code pulse.notification.delivery.duration{status=SENT|FAILED}} — длительность
+ * обработки доставки от claim до терминального статуса;
+ * {@code pulse.notification.oldest.pending.age} — возраст старейшей {@code DELIVERING};
+ * {@code pulse.e2e.notification.sent} — от публикации события инцидента
+ * (createdAt) до подтверждения доставки (SENT). Метки ограничены: ни userId,
+ * ни адресата в них нет.</p>
  */
 @Service
 public class NotificationService {
@@ -73,27 +86,36 @@ public class NotificationService {
                 "text", "Инцидент %s: правило %s, значение %s > %.1f"
                         .formatted(event.incidentKey(), event.ruleId(), event.value(), event.threshold()));
 
-        for (int attempt = 1; attempt <= properties.deliveryMaxAttempts(); attempt++) {
-            if (deliveryClient.deliver(payload)) {
-                repository.finish(event.eventId(), NotificationStatus.SENT, attempt, Instant.now());
-                Instant createdAt = event.createdAt();
-                if (createdAt != null) {
-                    deliveredLatency.record(Duration.between(createdAt, Instant.now(clock)));
+        long startNanos = System.nanoTime();
+        String outcome = NotificationStatus.FAILED.name();
+        try {
+            for (int attempt = 1; attempt <= properties.deliveryMaxAttempts(); attempt++) {
+                meterRegistry.counter("pulse.notification.attempts").increment();
+                if (deliveryClient.deliver(payload)) {
+                    repository.finish(event.eventId(), NotificationStatus.SENT, attempt, Instant.now());
+                    Instant createdAt = event.createdAt();
+                    if (createdAt != null) {
+                        deliveredLatency.record(Duration.between(createdAt, Instant.now(clock)));
+                    }
+                    meterRegistry.counter("pulse.notifications", "status", "sent").increment();
+                    outcome = NotificationStatus.SENT.name();
+                    log.info("Уведомление {} доставлено (попытка {})", event.eventId(), attempt);
+                    return;
                 }
-                meterRegistry.counter("pulse.notifications", "status", "sent").increment();
-                log.info("Уведомление {} доставлено (попытка {})", event.eventId(), attempt);
-                return;
+                if (attempt < properties.deliveryMaxAttempts()) {
+                    sleepQuietly();
+                }
             }
-            if (attempt < properties.deliveryMaxAttempts()) {
-                sleepQuietly();
-            }
-        }
 
-        repository.finish(event.eventId(), NotificationStatus.FAILED,
-                properties.deliveryMaxAttempts(), null);
-        meterRegistry.counter("pulse.notifications", "status", "failed").increment();
-        log.error("Уведомление {}: канал недоступен, попытки исчерпаны ({})",
-                event.eventId(), properties.deliveryMaxAttempts());
+            repository.finish(event.eventId(), NotificationStatus.FAILED,
+                    properties.deliveryMaxAttempts(), null);
+            meterRegistry.counter("pulse.notifications", "status", "failed").increment();
+            log.error("Уведомление {}: канал недоступен, попытки исчерпаны ({})",
+                    event.eventId(), properties.deliveryMaxAttempts());
+        } finally {
+            meterRegistry.timer("pulse.notification.delivery.duration", "status", outcome)
+                    .record(Duration.ofNanos(System.nanoTime() - startNanos));
+        }
     }
 
     private void sleepQuietly() {
