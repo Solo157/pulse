@@ -1,50 +1,80 @@
 package com.pulse.metric.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pulse.contracts.common.MetricPoint;
+import com.pulse.contracts.event.MetricEvent;
+import com.pulse.contracts.event.SchemaVersions;
 import com.pulse.metric.config.PulseProperties;
-import java.util.concurrent.ExecutionException;
+import com.pulse.metric.exception.KafkaUnavailableException;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 /**
- * Отправка готового payload {@code MetricEvent} в топик metrics с key = userId.
- *
- * <p>Вызывается только отправителем outbox ({@link IngestOutboxService}): событие
- * уже устойчиво принято в PostgreSQL (HTTP 202 выдан по факту записи в
- * transactional outbox), поэтому недоступная Kafka задерживает доставку,
- * но не отменяет приём и не приводит к дублям — eventId первичный ключ очереди.</p>
+ * Публикует MetricEvent в топик metrics и ждёт подтверждения брокера:
+ * метод завершается успешно только после ack (условие 202 по FR-2).
  */
 @Service
 public class MetricEventPublisher {
 
+    private static final Logger log = LoggerFactory.getLogger(MetricEventPublisher.class);
+
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
     private final String metricsTopic;
-    private final java.time.Duration publishAckTimeout;
+    private final Duration publishAckTimeout;
+    private final Counter publishedCounter;
+    private final Counter failedCounter;
 
     public MetricEventPublisher(KafkaTemplate<String, String> kafkaTemplate,
-                                PulseProperties properties) {
+                                ObjectMapper objectMapper,
+                                PulseProperties properties,
+                                MeterRegistry meterRegistry) {
         this.kafkaTemplate = kafkaTemplate;
+        this.objectMapper = objectMapper;
         this.metricsTopic = properties.topics().metrics();
         this.publishAckTimeout = properties.publishAckTimeout();
+        this.publishedCounter = meterRegistry.counter("pulse.kafka.publish.success", "topic", metricsTopic);
+        this.failedCounter = meterRegistry.counter("pulse.kafka.publish.failure", "topic", metricsTopic);
     }
 
     /**
-     * Публикует payload и ждёт подтверждения брокера.
+     * Собирает событие из точек и публикует его с key = userId.
      *
-     * @throws org.springframework.kafka.KafkaException брокер не подтвердил запись
-     *         (таймаут ожидания либо синхронный отказ отправки)
+     * @return eventId созданного события
+     * @throws KafkaUnavailableException если брокер не подтвердил запись за publishAckTimeout
      */
-    public void publish(String messageKey, String payload) {
+    public String publish(UUID userId, List<MetricPoint> points, String requestId) {
+        String eventId = UUID.randomUUID().toString();
+        MetricEvent event = new MetricEvent(eventId, userId.toString(), SchemaVersions.CURRENT,
+                Instant.now(), requestId, points);
+        String payload = toJson(event);
         try {
-            kafkaTemplate.send(metricsTopic, messageKey, payload)
+            kafkaTemplate.send(metricsTopic, userId.toString(), payload)
                     .get(publishAckTimeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new org.springframework.kafka.KafkaException("Прервано ожидание подтверждения Kafka");
-        } catch (ExecutionException | TimeoutException failure) {
-            throw new org.springframework.kafka.KafkaException(
-                    "MetricEvent не подтверждён брокером", failure);
+            publishedCounter.increment();
+            log.debug("Событие {} пользователя {} записано в Kafka", eventId, userId);
+            return eventId;
+        } catch (Exception exception) {
+            failedCounter.increment();
+            throw new KafkaUnavailableException(exception);
+        }
+    }
+
+    private String toJson(MetricEvent event) {
+        try {
+            return objectMapper.writeValueAsString(event);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("Не удалось сериализовать MetricEvent", exception);
         }
     }
 }

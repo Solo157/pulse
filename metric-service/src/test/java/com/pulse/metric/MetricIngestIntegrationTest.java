@@ -7,8 +7,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.pulse.contracts.common.MetricPoint;
-import com.pulse.metric.service.IngestRequestHasher;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -42,10 +40,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * и Kafka (Spring Embedded). Проверяют статусы и тело ответов, публикацию события,
  * идемпотентность и отсутствие маскирующих 202 при недоступной Kafka (второй класс).
  */
-@SpringBootTest(properties = {
-        "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
-        "pulse.outbox-poll-interval=200ms"
-})
+@SpringBootTest(properties = "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}")
 @AutoConfigureMockMvc
 @EmbeddedKafka(topics = "metrics", count = 1)
 @Testcontainers
@@ -157,45 +152,20 @@ class MetricIngestIntegrationTest {
     }
 
     @Test
-    void незавершённыйПриёмСТемЖеТеломЭто202ITotЖeEventIdаДругоеТелоЭто409() throws Exception {
+    void повторНезавершённогоПриёмаКонфликт() throws Exception {
         String userId = register("inflight@pulse.dev");
         String idempotencyKey = UUID.randomUUID().toString();
-        String eventId = UUID.randomUUID().toString();
-        // Тело того же состава, что отправим ниже: хеш запроса обязан совпасть.
-        List<MetricPoint> samePoints = List.of(new MetricPoint("cpu", 1,
-                java.time.Instant.parse("2026-11-06T10:00:00Z")));
-        String requestHash = IngestRequestHasher.hash(objectMapper, samePoints);
-        // Моделируем приём, застрявший до подтверждения брокера (событие уже в очереди).
+        // Моделируем шаг приёма, застрявший до подтверждения брокером.
         jdbcTemplate.update("""
-                INSERT INTO metric.ingest_idempotency
-                    (idempotency_key, user_id, status, event_id, accepted_count, request_hash)
-                VALUES (?, ?, 'IN_PROGRESS', ?, 1, ?)
-                ON CONFLICT DO NOTHING
-                """, idempotencyKey, UUID.fromString(userId), eventId, requestHash);
+                INSERT INTO metric.ingest_idempotency (idempotency_key, user_id, status)
+                VALUES (?, ?, 'IN_PROGRESS')
+                """, idempotencyKey, UUID.fromString(userId));
 
-        // Тот же ключ и то же тело: приём устойчив, отвечаем прежним eventId.
         mockMvc.perform(post("/users/" + userId + "/metrics")
                         .header("Idempotency-Key", idempotencyKey)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(metricPointJson("cpu", 1)))
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.eventId").value(eventId));
-
-        // Тот же ключ, другое тело — конфликт (P0-2: не отдаём чужой принятый ответ).
-        mockMvc.perform(post("/users/" + userId + "/metrics")
-                        .header("Idempotency-Key", idempotencyKey)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(metricPointJson("memory", 2)))
                 .andExpect(status().isConflict());
-
-        // Новый ключ — новая операция.
-        mockMvc.perform(post("/users/" + userId + "/metrics")
-                        .header("Idempotency-Key", UUID.randomUUID().toString())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(metricPointJson("cpu", 1)))
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.eventId").value(
-                                org.hamcrest.Matchers.not(eventId)));
     }
 
     private String register(String email) throws Exception {

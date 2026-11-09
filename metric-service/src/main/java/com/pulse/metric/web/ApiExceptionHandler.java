@@ -4,6 +4,7 @@ import com.pulse.metric.config.RequestIdFilter;
 import com.pulse.metric.exception.DataUnavailableException;
 import com.pulse.metric.exception.EmailAlreadyRegisteredException;
 import com.pulse.metric.exception.IdempotencyConflictException;
+import com.pulse.metric.exception.KafkaUnavailableException;
 import com.pulse.metric.exception.PayloadTooLargeException;
 import com.pulse.metric.exception.UserNotFoundException;
 import org.slf4j.MDC;
@@ -58,6 +59,10 @@ public class ApiExceptionHandler {
         return problem(HttpStatus.PAYLOAD_TOO_LARGE, exception.getMessage());
     }
 
+    @ExceptionHandler(KafkaUnavailableException.class)
+    public ProblemDetail kafkaUnavailable(KafkaUnavailableException exception) {
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, "Сервис временно недоступен, попробуйте позже");
+    }
 
     @ExceptionHandler(DataUnavailableException.class)
     public ProblemDetail dataUnavailable(DataUnavailableException exception) {
