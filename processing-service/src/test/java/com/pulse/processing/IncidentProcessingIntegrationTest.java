@@ -45,7 +45,6 @@ import org.testcontainers.junit.jupiter.Testcontainers;
         "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
         "pulse.close-cooldown=10s",
         "pulse.rule-cache-ttl=2s",
-        "pulse.outbox-poll-interval=200ms",
         "management.health.defaults.enabled=false"
 })
 @EmbeddedKafka(topics = {"metrics", "incidents"}, count = 1)

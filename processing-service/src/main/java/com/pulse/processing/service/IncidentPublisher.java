@@ -1,6 +1,12 @@
 package com.pulse.processing.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pulse.contracts.event.IncidentDetected;
+import com.pulse.contracts.event.SchemaVersions;
 import com.pulse.processing.config.ProcessingProperties;
+import java.time.Instant;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -8,43 +14,55 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * Отправка готового payload события {@code IncidentDetected} в топик {@code incidents}
+ * Публикация {@code IncidentDetected} в топик {@code incidents}
  * с key = {@code userId} (раздел 7: порядок и партиционирование по владельцу).
  *
- * <p>Вызывается только оповещателем {@link OutboxService}: событие уже записано
- * в transactional outbox одной транзакцией с переходом state-машины, поэтому
- * недоступность Kafka здесь задерживает публикацию, но не теряет событие.</p>
+ * <p>Публикация выполняется ДО фиксации перехода в {@code metric.incident_state}:
+ * сбой между этими шагами даёт повтор события при повторной обработке,
+ * но никогда — потерю инцидента (at-least-once; потребители идемпотентны).</p>
  */
 @Component
 public class IncidentPublisher {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
     private final ProcessingProperties properties;
 
     public IncidentPublisher(KafkaTemplate<String, String> kafkaTemplate,
-            ProcessingProperties properties) {
+            ObjectMapper objectMapper, ProcessingProperties properties) {
         this.kafkaTemplate = kafkaTemplate;
+        this.objectMapper = objectMapper;
         this.properties = properties;
     }
 
     /**
-     * Публикует payload и ждёт подтверждения брокера.
+     * Публикует событие нарушения/закрытия и ждёт подтверждения брокера.
      *
      * @throws IncidentPublishException брокер не подтвердил запись за {@code pulse.publish-ack-timeout}
      */
-    public void publish(String messageKey, String payload) {
+    public void publish(String userId, String ruleId, boolean close, String metricName,
+            double threshold, Double value, Instant sampleTime, String requestId) {
+        IncidentDetected event = new IncidentDetected(
+                UUID.randomUUID().toString(), userId, ruleId,
+                userId + ":" + ruleId, close, metricName, threshold, value,
+                Instant.now(), close ? null : sampleTime, SchemaVersions.CURRENT, requestId);
+        String payload = serialize(event);
         try {
-            kafkaTemplate.send(properties.incidentsTopic(), messageKey, payload)
+            kafkaTemplate.send(properties.incidentsTopic(), userId, payload)
                     .get(properties.publishAckTimeout().toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IncidentPublishException("Прервано ожидание подтверждения Kafka", interrupted);
         } catch (ExecutionException | TimeoutException failure) {
             throw new IncidentPublishException("IncidentDetected не подтверждён брокером", failure);
-        } catch (org.springframework.kafka.KafkaException failure) {
-            // Синхронный отказ KafkaTemplate (например, метаданные топика не получены
-            // за max.block.ms при недоступном кластере).
-            throw new IncidentPublishException("IncidentDetected не отправлен в Kafka", failure);
+        }
+    }
+
+    private String serialize(IncidentDetected event) {
+        try {
+            return objectMapper.writeValueAsString(event);
+        } catch (JsonProcessingException failure) {
+            throw new IllegalStateException("Не удалось сериализовать IncidentDetected", failure);
         }
     }
 

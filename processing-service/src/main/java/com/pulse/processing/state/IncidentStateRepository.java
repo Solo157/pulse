@@ -46,17 +46,13 @@ public class IncidentStateRepository {
                 .stream().findFirst();
     }
 
-    /**
-     * Открывает инцидент: фиксировалась до этого точка нарушения в момент {@code violationAt}.
-     * Условие {@code open = FALSE} гарантирует один переход и один event на период;
-     * возвращает {@code false}, если инцидент уже был открыт (защита от гонок и повторов).
-     */
-    public boolean openIncident(String incidentKey, Instant openedAt, Instant violationAt) {
-        return jdbcTemplate.update("""
+    /** Открывает инцидент: фиксировалась до этого точка нарушения в момент {@code violationAt}. */
+    public void openIncident(String incidentKey, Instant openedAt, Instant violationAt) {
+        jdbcTemplate.update("""
                 UPDATE metric.incident_state
                 SET open = TRUE, opened_at = ?, last_violation_at = ?
-                WHERE incident_key = ? AND open = FALSE
-                """, Timestamp.from(openedAt), Timestamp.from(violationAt), incidentKey) == 1;
+                WHERE incident_key = ?
+                """, Timestamp.from(openedAt), Timestamp.from(violationAt), incidentKey);
     }
 
     /** Продлевает непрерывное нарушение (инцидент уже открыт). */
@@ -65,14 +61,10 @@ public class IncidentStateRepository {
                 Timestamp.from(violationAt), incidentKey);
     }
 
-    /**
-     * Закрывает инцидент (значение вернулось в норму не раньше cooldown).
-     * Условие {@code open = TRUE} — один переход и один event; {@code false}, если уже закрыт.
-     */
-    public boolean closeIncident(String incidentKey) {
-        return jdbcTemplate.update(
-                "UPDATE metric.incident_state SET open = FALSE WHERE incident_key = ? AND open = TRUE",
-                incidentKey) == 1;
+    /** Закрывает инцидент (значение вернулось в норму не раньше cooldown). */
+    public void closeIncident(String incidentKey) {
+        jdbcTemplate.update("UPDATE metric.incident_state SET open = FALSE WHERE incident_key = ?",
+                incidentKey);
     }
 
     private IncidentState mapState(ResultSet rs, UUID userId, String ruleId, String metricName)
