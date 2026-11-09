@@ -16,7 +16,7 @@
 #   F5 clickhouse-stop  : GET /metrics -> 503 за <=3 c (TimeLimiter/CircuitBreaker),
 #                         ingest 202, LAG storage-group -> дренаж после старта
 #   F6 kafka-kill       : docker kill --signal=KILL kafka1 -> клиент продолжает
-#                         получать 202 (P0-2: приём в outbox PG не зависит от Kafka);
+#                         получать 202 (приём в outbox PG не зависит от Kafka);
 #                         после старта брокера outbox дозапускается за секунды
 #   F7 postgres-stop    : auth/read/ingest деградируют (PG = auth/идемпотентность/инциденты)
 #
