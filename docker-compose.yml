@@ -264,6 +264,10 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092
+      # Настройки демонстрационного канала (сценарий F8 меняет их без правки файла)
+      PULSE_DELIVERY_URL: ${PULSE_DELIVERY_URL-http://localhost:8083/internal/demo-receiver}
+      PULSE_DELIVERY_MAX_ATTEMPTS: ${PULSE_DELIVERY_MAX_ATTEMPTS-3}
+      PULSE_DELIVERY_RETRY_DELAY: ${PULSE_DELIVERY_RETRY_DELAY-1s}
     depends_on:
       postgres:
         condition: service_healthy
@@ -285,6 +289,10 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka1:9092,kafka2:9092
+      # Настройки демонстрационного канала (сценарий F8 меняет их без правки файла)
+      PULSE_DELIVERY_URL: ${PULSE_DELIVERY_URL-http://localhost:8083/internal/demo-receiver}
+      PULSE_DELIVERY_MAX_ATTEMPTS: ${PULSE_DELIVERY_MAX_ATTEMPTS-3}
+      PULSE_DELIVERY_RETRY_DELAY: ${PULSE_DELIVERY_RETRY_DELAY-1s}
     depends_on:
       postgres:
         condition: service_healthy
