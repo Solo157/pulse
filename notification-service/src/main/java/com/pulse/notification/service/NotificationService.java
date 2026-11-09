@@ -5,6 +5,9 @@ import com.pulse.notification.config.NotificationProperties;
 import com.pulse.notification.repository.NotificationRepository;
 import com.pulse.notification.repository.NotificationStatus;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
@@ -22,6 +25,9 @@ import org.springframework.stereotype.Service;
  * синхронно с ограниченным числом попыток и паузами между ними; терминальный
  * статус ({@code SENT}/{@code FAILED}) всегда зафиксирован в БД, это и есть
  * проверяемый этап доставки.</p>
+ *
+ * <p>Гистограмма {@code pulse.e2e.notification.sent} — от публикации события
+ * инцидента (createdAt) до подтверждения доставки (SENT).</p>
  */
 @Service
 public class NotificationService {
@@ -31,15 +37,19 @@ public class NotificationService {
     private final NotificationRepository repository;
     private final NotificationDeliveryClient deliveryClient;
     private final NotificationProperties properties;
+    private final Clock clock;
     private final MeterRegistry meterRegistry;
+    private final Timer deliveredLatency;
 
     public NotificationService(NotificationRepository repository,
             NotificationDeliveryClient deliveryClient, NotificationProperties properties,
-            MeterRegistry meterRegistry) {
+            MeterRegistry meterRegistry, Clock clock) {
         this.repository = repository;
         this.deliveryClient = deliveryClient;
         this.properties = properties;
+        this.clock = clock;
         this.meterRegistry = meterRegistry;
+        this.deliveredLatency = meterRegistry.timer("pulse.e2e.notification.sent");
     }
 
     /** Обрабатывает событие инцидента: только открытие порождает уведомление. */
@@ -66,6 +76,10 @@ public class NotificationService {
         for (int attempt = 1; attempt <= properties.deliveryMaxAttempts(); attempt++) {
             if (deliveryClient.deliver(payload)) {
                 repository.finish(event.eventId(), NotificationStatus.SENT, attempt, Instant.now());
+                Instant createdAt = event.createdAt();
+                if (createdAt != null) {
+                    deliveredLatency.record(Duration.between(createdAt, Instant.now(clock)));
+                }
                 meterRegistry.counter("pulse.notifications", "status", "sent").increment();
                 log.info("Уведомление {} доставлено (попытка {})", event.eventId(), attempt);
                 return;

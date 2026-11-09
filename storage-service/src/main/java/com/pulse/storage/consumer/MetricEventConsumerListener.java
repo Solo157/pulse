@@ -5,6 +5,9 @@ import com.pulse.contracts.event.MetricEvent;
 import com.pulse.storage.service.ClickHousePointsWriter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
@@ -18,6 +21,11 @@ import org.springframework.stereotype.Component;
  * Коммит offset'ов выполняется батче-контейнером только после успешной вставки
  * всей пачки (spring.listener.ack-mode=batch); при ошибке вставки offset не двигается,
  * контейнер повторяет пачку с backoff.
+ *
+ * <p>Сквозные задержки (FR «доступность данных до 5 с»): гистограмма
+ * {@code pulse.event.age} — возраст события на входе потребителя (от acceptedAt),
+ * {@code pulse.e2e.clickhouse.visible} — от принятия пакета до записи в ClickHouse,
+ * после которой он виден запросам. Метки ограничены: ни userId, ни eventId в них нет.</p>
  */
 @Component
 public class MetricEventConsumerListener {
@@ -26,14 +34,21 @@ public class MetricEventConsumerListener {
 
     private final ClickHousePointsWriter writer;
     private final ObjectMapper objectMapper;
+    private final Clock clock;
     private final Timer insertTimer;
+    private final Timer eventAgeTimer;
+    private final Timer visibleTimer;
 
     public MetricEventConsumerListener(ClickHousePointsWriter writer,
                                        ObjectMapper objectMapper,
-                                       MeterRegistry meterRegistry) {
+                                       MeterRegistry meterRegistry,
+                                       Clock clock) {
         this.writer = writer;
         this.objectMapper = objectMapper;
+        this.clock = clock;
         this.insertTimer = meterRegistry.timer("pulse.storage.insert.duration");
+        this.eventAgeTimer = meterRegistry.timer("pulse.event.age", "consumer", "storage-group");
+        this.visibleTimer = meterRegistry.timer("pulse.e2e.clickhouse.visible");
     }
 
     /** Одна пачка (poll) обрабатывается одним вызовом: максимум max-poll-records событий. */
@@ -58,9 +73,19 @@ public class MetricEventConsumerListener {
         }
         MDC.put("requestId", event.requestId());
         try {
+            recordSinceAccepted(eventAgeTimer, event);
             writer.insertPoints(event.userId(), event.eventId(), event.points());
+            recordSinceAccepted(visibleTimer, event);
         } finally {
             MDC.remove("requestId");
+        }
+    }
+
+    /** Возраст события от момента принятия MetricService; отсутствие acceptedAt не ломает запись. */
+    private void recordSinceAccepted(Timer timer, MetricEvent event) {
+        Instant acceptedAt = event.acceptedAt();
+        if (acceptedAt != null) {
+            timer.record(Duration.between(acceptedAt, Instant.now(clock)));
         }
     }
 }

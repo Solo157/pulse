@@ -7,6 +7,8 @@ import com.pulse.processing.service.IncidentPublisher.IncidentPublishException;
 import com.pulse.processing.state.OutboxRepository;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -24,6 +26,10 @@ import org.springframework.stereotype.Service;
  * непроявленные записи после сбоя и при старте сервиса; повторная публикация
  * отдаёт байт-в-байт то же событие со стабильным {@code eventId} — потребители
  * идемпотентны.</p>
+ *
+ * <p>Гистограмма {@code pulse.e2e.incident.published} — от времени точки
+ * (sampleTime, точка принята ingest'ом) до подтверждения публикации события
+ * брокером: это участок «ingest accepted → incident published» целиком.</p>
  */
 @Service
 public class OutboxService {
@@ -33,16 +39,20 @@ public class OutboxService {
     private final OutboxRepository outbox;
     private final IncidentPublisher publisher;
     private final ObjectMapper objectMapper;
+    private final Clock clock;
     private final Counter publishedCounter;
     private final Counter failedCounter;
+    private final Timer publishedLatency;
 
     public OutboxService(OutboxRepository outbox, IncidentPublisher publisher,
-            ObjectMapper objectMapper, MeterRegistry meterRegistry) {
+            ObjectMapper objectMapper, MeterRegistry meterRegistry, Clock clock) {
         this.outbox = outbox;
         this.publisher = publisher;
         this.objectMapper = objectMapper;
+        this.clock = clock;
         this.publishedCounter = meterRegistry.counter("pulse.processing.outbox.published");
         this.failedCounter = meterRegistry.counter("pulse.processing.outbox.failed");
+        this.publishedLatency = meterRegistry.timer("pulse.e2e.incident.published");
     }
 
     /**
@@ -81,6 +91,7 @@ public class OutboxService {
             try {
                 publisher.publish(pending.messageKey(), pending.payload());
                 outbox.markPublished(pending.id());
+                recordPublishedLatency(pending.payload());
                 publishedCounter.increment();
                 published++;
             } catch (IncidentPublishException failure) {
@@ -102,6 +113,21 @@ public class OutboxService {
             log.info("Outbox: удалено опубликованных записей старше {}: {}", retention, deleted);
         }
         return deleted;
+    }
+
+    /**
+     * Измерение «ingest accepted → incident published» по sampleTime события.
+     * Нечитаемый payload не должен ломать уже успешную публикацию — только без метрики.
+     */
+    private void recordPublishedLatency(String payload) {
+        try {
+            Instant sampleTime = objectMapper.readValue(payload, IncidentDetected.class).sampleTime();
+            if (sampleTime != null) {
+                publishedLatency.record(Duration.between(sampleTime, Instant.now(clock)));
+            }
+        } catch (JsonProcessingException failure) {
+            log.debug("Latency-метрика пропущена: payload не разобран", failure);
+        }
     }
 
     /** Пауза повтора: backoffBase * 2^shift (shift растёт с числом попыток, ограниченно). */

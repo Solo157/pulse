@@ -68,6 +68,10 @@ management:
         enabled: true
       show-details: always
   metrics:
+    distribution:
+      percentiles-histogram:
+        pulse.event.age: true
+        pulse.e2e.incident.published: true
     tags:
       application: ${spring.application.name}
       instance: ${INSTANCE_ID:${HOSTNAME:${spring.application.name}}}
