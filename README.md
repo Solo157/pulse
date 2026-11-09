@@ -216,8 +216,13 @@ docker compose --profile obs up -d
 
 - Prometheus: <http://localhost:9090> — собирает `/actuator/prometheus` со всех
   четырёх сервисов; новые копии сервисов находятся через DNS Docker сами.
+- Consumer lag Kafka экспортирует `kafka-lag-exporter` (Admin API, в группы не
+  вступает): лаг по группам/топикам/партициям и время лага — метрики
+  `kafka_consumergroup_group_*`. Whitelist групп и топиков — в
+  `monitoring/kafka-lag-exporter/application.conf`.
 - Grafana: <http://localhost:3000> (вход из `.env`), папка **Pulse** →
-  дашборд `pulse-overview`.
+  дашборд `pulse-overview` (в нём же панели лага: текущий лаг, скорость роста,
+  прогресс групп, время лага до дренажа).
 
 ## Тесты и полная проверка
 

@@ -328,6 +328,23 @@ services:
     ports: ["3000:3000"]
     depends_on: [prometheus]
 
+  # Экспорт consumer lag Kafka (лаги/прогресс групп конвейера) в Prometheus-формате.
+  # Читает смещения через Admin API, в группы не вступает; группы и топики
+  # заданы явно в monitoring/kafka-lag-exporter/application.conf.
+  kafka-exporter:
+    profiles: [obs]
+    image: lightbend/kafka-lag-exporter:0.6.8
+    container_name: pulse-kafka-exporter
+    restart: unless-stopped
+    networks: [pulse]
+    volumes:
+      - ./monitoring/kafka-lag-exporter/application.conf:/opt/docker/conf/application.conf:ro
+    depends_on:
+      kafka1:
+        condition: service_healthy
+      kafka2:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   clickhouse_data:
