@@ -214,10 +214,9 @@ docker compose up -d --scale metric-service=3 --scale storage-service=2
 Kafka сама распределит партиции между читателями; nginx начнёт слать запросы
 на новые копии `metric-service` без перезагрузки. Замеры и методика нагрузочных
 прогонов — `docs/results-et7.md`; генератор нагрузки — `./loadgen.py`
-(профили `baseline` / `step` / `burst`). Интенсивность задаётся в **точках
-метрик**: `LOAD_BATCH_SIZE` точек в payload и `LOAD_TARGET_POINTS_PER_SEC`
-(HTTP RPS = target/batch); в отчёте offered/accepted/проверка ClickHouse и
-лаг Kafka раздельны. Сценарии отказов и их результаты —
+(профили `baseline` / `step` / `burst`, интенсивность `LOAD_RPS` запросов/с,
+одиночные события в payload; шаг ступени — `LOAD_STEP_SECONDS`, вершина
+бу́рста — `LOAD_BURST_MULT`). Сценарии отказов и их результаты —
 `docs/fault-injection.md`, шаги воспроизведения — `scripts/chaos.sh`.
 
 ## Мониторинг (профиль obs)

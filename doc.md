@@ -87,21 +87,19 @@ threshold, value, createdAt, sampleTime, schemaVersion, requestId}`. Ошибк�
 
 ## 5. Отказоустойчивость
 
-- **Ingest**: `202` выдаётся после устойчивой записи пакета в PostgreSQL —
-  журнал идемпотентности и событие в таблице-очереди `metric.ingest_outbox`
-  создаются одной транзакцией. Отдельный отправитель добирает очередь в Kafka
-  at-least-once (ack `acks=all`, растущая пауза повтора); мёртвая Kafka больше
-  не даёт 503 — она только задерживает доставку. Повтор с тем же
-  `Idempotency-Key` и телом отдаёт прежний ответ, с другим телом — 409.
-  Опубликованные записи очищаются по `pulse.outbox-retention`, журнал — по
-  `pulse.idempotency-retention`.
-- **Обработка инцидентов**: переход состояния инцидента и запись события
-  `IncidentDetected` в таблицу-очередь `metric.incident_outbox` фиксируются
-  одной транзакцией PostgreSQL. Отдельный отправитель раз в секунду добирает
-  неоправленные события (после сбоя Kafka или падения сервиса) с растущей
-  паузой повтора; повторная отправка отдаёт то же событие с тем же `eventId`,
-  потребители от него защищены. Опубликованные записи очищаются через
-  `pulse.outbox-retention`.
+- **Ingest**: `202` выдаётся после подтверждения записи события брокером Kafka
+  (`acks=all`, ожидание с таймаутом `pulse.publish-ack-timeout`). Повтор с тем
+  же `Idempotency-Key` и тем же телом отдаёт прежний ответ, с другим телом —
+  409. Принятые ограничения (решение оператора 2026-11-09, `docs/decisions.md`):
+  при недоступной Kafka ingest отдаёт 5xx; при таймауте подтверждения повтор
+  клиента может создать второе событие с новым `eventId`; падение сервиса
+  между фиксацией `IN_PROGRESS` и ack оставляет ключ зависшим (ответ 409 до
+  ручной очистки журнала).
+- **Обработка инцидентов**: переход состояния инцидента и публикация
+  `IncidentDetected` — два независимых шага (не атомарны, принято оператором
+  2026-11-09): при недоступной Kafka событие инцидента теряется, состояние
+  при этом изменено. Повторная обработка пакета тем же потребителем создаёт
+  событие с новым `eventId` (потребители идемпотентны по `incidentKey`).
 - **Консьюмеры**: `auto-offset-reset=earliest`, commit пачки после записи,
   `DefaultErrorHandler` = бесконечные повторы через 2 с (Kafka/БД ждём, не теряем;
   отравленные сообщения десериализуются в dead-letter-логирование конвертером).
@@ -129,11 +127,7 @@ compose задаёт только адреса (`SPRING_DATASOURCE_URL`, `PULSE_
 |---|---|---|
 | `pulse.max-points-per-request` | 1000 | лимит точек в пакете |
 | `pulse.max-request-body-bytes` | 1 MiB | лимит тела (страховка tomcat `max-swallow-size` 1MB) |
-| `pulse.publish-ack-timeout` | 5s | ожидание ack Kafka при отправке из очереди |
-| `pulse.outbox-poll-interval` (`PULSE_OUTBOX_POLL_INTERVAL`) | 1s | период отправителя очереди `metric.ingest_outbox`; база паузы повтора (удваивается) |
-| `pulse.outbox-batch-size` (`PULSE_OUTBOX_BATCH_SIZE`) | 100 | событий в одной порции отправки |
-| `pulse.outbox-retention` (`PULSE_OUTBOX_RETENTION`) | 7d | срок хранения отправленных записей очереди |
-| `pulse.idempotency-retention` (`PULSE_IDEMPOTENCY_RETENTION`) | 30d | срок хранения завершённых записей журнала идемпотентности |
+| `pulse.publish-ack-timeout` | 5s | ожидание ack Kafka при публикации из запроса |
 | `spring.datasource.hikari.connection-timeout / validation-timeout` | 3000 / 2000 мс | пул соединений к PostgreSQL; настройки привязаны прямо к объекту пула (см. `ClickHouseConfig`) |
 | `spring.clickhouse.hikari.connection-timeout` | 3000 мс | пул соединений к ClickHouse (чтение) |
 | параметры в JDBC URL | PostgreSQL `connectTimeout=2&socketTimeout=5` с; ClickHouse `connect_timeout=2000&socket_timeout=10000` мс | драйвер отвечает быстрее, чем пул, — сбой заметен сразу |
@@ -160,11 +154,7 @@ compose задаёт только адреса (`SPRING_DATASOURCE_URL`, `PULSE_
 | `pulse.rule-cache-ttl` (`PULSE_RULE_CACHE_TTL`) | 30s | как часто перечитывать правила из базы |
 | `pulse.close-cooldown` (`PULSE_CLOSE_COOLDOWN`) | 60s | не закрывать инцидент чаще раза в минуту (защита от дребезга) |
 | `pulse.publish-ack-timeout` | 5s | ack для `incidents` |
-| `pulse.outbox-poll-interval` (`PULSE_OUTBOX_POLL_INTERVAL`) | 1s | как часто отправитель добирает очередь `metric.incident_outbox`; он же база паузы повтора (удваивается) |
-| `pulse.outbox-batch-size` (`PULSE_OUTBOX_BATCH_SIZE`) | 100 | событий в одной порции отправки |
-| `pulse.outbox-retention` (`PULSE_OUTBOX_RETENTION`) | 7d | срок хранения отправленных записей очереди |
 | producer `acks=all` + idempotence | — | как ingest |
-| метрики | `pulse.processing.points`, `pulse.processing.outbox.pending`, `pulse.processing.outbox.oldest-pending-seconds`, `pulse.processing.outbox.published/failed` | глубина и задержка очереди отправки событий |
 
 ### notification-service (8083)
 

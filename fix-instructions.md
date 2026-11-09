@@ -19,6 +19,9 @@
 
 ## P0-1. Гарантированная публикация событий открытия/закрытия инцидентов
 
+> **ОТМЕНЕНО решением оператора 2026-11-09.** Реализация откачена, не выполнять.
+> Журнал: docs/decisions.md, секция «Отмена принятых P0-1/P0-2/P0-3».
+
 ### Затронутые файлы
 - `processing-service/src/main/java/com/pulse/processing/service/IncidentEvaluator.java`
 - `processing-service/src/main/java/com/pulse/processing/service/IncidentPublisher.java`
@@ -56,6 +59,9 @@
 
 ## P0-2. Устойчивый idempotency ingest при неопределённом результате Kafka publish
 
+> **ОТМЕНЕНО решением оператора 2026-11-09.** Реализация откачена, не выполнять.
+> Журнал: docs/decisions.md, секция «Отмена принятых P0-1/P0-2/P0-3».
+
 ### Затронутые файлы
 - `metric-service/src/main/java/com/pulse/metric/service/MetricIngestService.java`
 - `metric-service/src/main/java/com/pulse/metric/service/MetricEventPublisher.java`
@@ -90,6 +96,9 @@
 7. Успешный HTTP 202 соответствует устойчиво принятой операции, а не только попытке отправить сообщение.
 
 ## P0-3. Переделать loadgen на измерение points/s и batch size
+
+> **ОТМЕНЕНО решением оператора 2026-11-09.** Реализация откачена, не выполнять.
+> Журнал: docs/decisions.md, секция «Отмена принятых P0-1/P0-2/P0-3».
 
 ### Затронутые файлы
 - `loadgen.py`
@@ -271,6 +280,9 @@ Postgres, ClickHouse, Kafka и Redis должны оставаться внут�
 Согласовать retention/TTL и политику удаления/архивации. Не включать TTL без согласования, потому что это меняет пользовательскую историю. Добавить оценку дискового объёма и предупреждение о storage growth.
 
 ## P1-10. Пропускная способность отправителя ingest-outbox (находка замера P0-3)
+
+> **ОТМЕНЕНО решением оператора 2026-11-09.** Реализация откачена, не выполнять.
+> Журнал: docs/decisions.md, секция «Отмена принятых P0-1/P0-2/P0-3».
 
 Замер 2026-11-08 (`docs/results-et7.md`): HTTP-приём держит 60k точек/с, но
 отправитель outbox публикует в Kafka ≈ 42 события/с (≈ 4.3k точек/с при
