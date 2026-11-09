@@ -5,6 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pulse.contracts.event.IncidentDetected;
 import com.pulse.contracts.event.SchemaVersions;
 import com.pulse.processing.config.ProcessingProperties;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
@@ -17,6 +21,10 @@ import org.springframework.stereotype.Component;
  * Публикация {@code IncidentDetected} в топик {@code incidents}
  * с key = {@code userId} (раздел 7: порядок и партиционирование по владельцу).
  *
+ * <p>Гистограмма {@code pulse.e2e.incident.published} — от времени точки
+ * (sampleTime открытого инцидента) до подтверждения публикации брокером:
+ * участок «точка принята → событие инцидента в Kafka» целиком.</p>
+ *
  * <p>Публикация выполняется ДО фиксации перехода в {@code metric.incident_state}:
  * сбой между этими шагами даёт повтор события при повторной обработке,
  * но никогда — потерю инцидента (at-least-once; потребители идемпотентны).</p>
@@ -27,12 +35,17 @@ public class IncidentPublisher {
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
     private final ProcessingProperties properties;
+    private final Clock clock;
+    private final Timer publishedLatency;
 
     public IncidentPublisher(KafkaTemplate<String, String> kafkaTemplate,
-            ObjectMapper objectMapper, ProcessingProperties properties) {
+            ObjectMapper objectMapper, ProcessingProperties properties,
+            MeterRegistry meterRegistry, Clock clock) {
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
         this.properties = properties;
+        this.clock = clock;
+        this.publishedLatency = meterRegistry.timer("pulse.e2e.incident.published");
     }
 
     /**
@@ -50,6 +63,10 @@ public class IncidentPublisher {
         try {
             kafkaTemplate.send(properties.incidentsTopic(), userId, payload)
                     .get(properties.publishAckTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            if (!close && sampleTime != null) {
+                publishedLatency.record(
+                        Duration.between(sampleTime, Instant.now(clock)));
+            }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IncidentPublishException("Прервано ожидание подтверждения Kafka", interrupted);
