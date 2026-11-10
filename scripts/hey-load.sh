@@ -12,9 +12,19 @@ EMAIL=${1:?email}; PASS=${2:?password}; RPS=${3:?rps}; DUR=${4:?seconds}
 BASE=${LOAD_BASE:-http://localhost}
 
 BODY=$(printf '{"email":"%s","password":"%s"}' "$EMAIL" "$PASS")
-RESP=$(curl -sf -X POST "$BASE/auth/register" -H 'Content-Type: application/json' -d "$BODY")
+RESP=$(curl -s -X POST "$BASE/auth/register" -H 'Content-Type: application/json' -d "$BODY" || true)
 USER_ID=$(printf '%s' "$RESP" | sed -n 's/.*"userId":"\([^"]*\)".*/\1/p')
-[ -n "$USER_ID" ] || { echo "не удалось зарегистрировать пользователя: $RESP" >&2; exit 1; }
+if [ -z "$USER_ID" ]; then
+  # пользователь уже зарегистрирован (email нормализуется в нижний регистр) —
+  # берём userId из БД стенда и проверяем пароль через read-API (Basic)
+  EMAIL_LC=$(printf '%s' "$EMAIL" | tr '[:upper:]' '[:lower:]')
+  USER_ID=$(docker exec postgres psql -U pulse -d pulse -tAc \
+    "select id from metric.users where email='$EMAIL_LC'" | head -1)
+  [ -n "$USER_ID" ] || { echo "регистрация не прошла и пользователя '$EMAIL_LC' нет в БД: $RESP" >&2; exit 1; }
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$USER_ID:$PASS" "$BASE/users/$USER_ID/metrics")
+  [ "$CODE" = 200 ] || { echo "пароль не подходит для $EMAIL_LC (read-API: $CODE)" >&2; exit 1; }
+  echo "пользователь уже существует: $EMAIL_LC (userId=$USER_ID, пароль подтверждён)"
+fi
 echo "userId=$USER_ID, rps=$RPS, длительность=${DUR}s"
 
 OUT="results/hey-$(date +%Y%m%d).log"
