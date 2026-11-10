@@ -1,0 +1,75 @@
+# processing-service (Этап 3): правила мониторинга, state-машина инцидентов (раздел 8).
+
+spring:
+  application:
+    name: pulse-processing-service
+  datasource:
+    hikari:
+      connection-timeout: 3000
+      validation-timeout: 2000
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/pulse?connectTimeout=2&socketTimeout=5}
+    username: ${SPRING_DATASOURCE_USERNAME:pulse}
+    password: ${SPRING_DATASOURCE_PASSWORD:change-me}
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: processing-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      properties:
+        max.poll.interval.ms: 120000
+        session.timeout.ms: 15000
+  jackson:
+    # События обмениваются JSON с ISO-8601 датами (согласование п. 7).
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      # Читаем чужие события: неизвестные поля допускаем — схема может расширяться.
+      fail-on-unknown-properties: false
+
+server:
+  port: ${PROCESSING_SERVER_PORT:8082}
+  shutdown: graceful
+
+pulse:
+  metrics-topic: ${KAFKA_METRICS_TOPIC:metrics}
+  incidents-topic: ${KAFKA_INCIDENTS_TOPIC:incidents}
+  close-cooldown: ${PULSE_CLOSE_COOLDOWN:60s}
+  rule-cache-ttl: ${PULSE_RULE_CACHE_TTL:30s}
+  publish-ack-timeout: ${PULSE_PUBLISH_ACK_TIMEOUT:5s}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        pulse.e2e.incident.published: true
+    tags:
+      application: ${spring.application.name}
+      instance: ${INSTANCE_ID:${HOSTNAME:${spring.application.name}}}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z'} %5p [${INSTANCE_ID:${HOSTNAME:${spring.application.name}}}] [req=%X{requestId:- }] %logger{20} - %msg%n"
+  level:
+    com.pulse: INFO

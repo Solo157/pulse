@@ -1,0 +1,26 @@
+# Build
+target/
+*.class
+*.jar
+!**/lib/*.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+
+# OS
+.DS_Store
+
+# Runtime / secrets
+.env
+*.log
+logs/
+volumes/
+
+# Python (load-tests / tooling)
+__pycache__/
+.venv/
+venv/
+loadgen-*.json

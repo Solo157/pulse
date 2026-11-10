@@ -1,0 +1,14 @@
+{
+ "profile": "baseline",
+ "base_rps": 20.0,
+ "duration_s": 50.0,
+ "workers": 8,
+ "burst_mult": null,
+ "step_mults": null,
+ "sent_ok": 999,
+ "sent_err": 0,
+ "p50_ms": 5.04,
+ "p95_ms": 6.11,
+ "max_ms": 13.52,
+ "user_id": "9716f165-b30d-4fbf-a3ab-3c75f7432355"
+}
