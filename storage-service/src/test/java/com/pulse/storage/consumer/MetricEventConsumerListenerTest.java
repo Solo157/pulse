@@ -24,8 +24,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 /**
- * Сквозные гистограммы потребителя storage: возраст пакета на входе и задержка
- * до видимости в ClickHouse измеряются от acceptedAt (изоляция: замоканный writer,
+ * Гистограмма задержки до видимости в ClickHouse (FR «доступность данных до 5 с»):
+ * измеряется от acceptedAt после успешной вставки (изоляция: замоканный writer,
  * фиксированные часы, реестр в памяти).
  */
 @ExtendWith(MockitoExtension.class)
@@ -38,19 +38,17 @@ class MetricEventConsumerListenerTest {
     private ClickHousePointsWriter writer;
 
     @Test
-    void shouldRecordAgeAndVisibleLatency_whenInsertSucceeds() {
+    void shouldRecordVisibleLatency_whenInsertSucceeds() {
         // Arrange
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        MetricEventConsumerListener listener = listenerWith(registry, Clock.fixed(NOW, ZoneOffset.UTC));
+        MetricEventConsumerListener listener = new MetricEventConsumerListener(
+                writer, objectMapper(), registry, Clock.fixed(NOW, ZoneOffset.UTC));
         String payload = payload(Instant.parse("2026-11-09T09:59:55Z"));
 
         // Act
         listener.onBatch(List.of(record(payload)));
 
         // Assert
-        assertThat(registry.timer("pulse.event.age", "consumer", "storage-group").totalTime(TimeUnit.SECONDS))
-                .as("возраст пакета на входе = acceptedAt -> now")
-                .isEqualTo(5.0);
         assertThat(registry.timer("pulse.e2e.clickhouse.visible").totalTime(TimeUnit.SECONDS))
                 .as("видимость в ClickHouse отсчитывается после вставки той же точки")
                 .isEqualTo(5.0);
@@ -60,26 +58,20 @@ class MetricEventConsumerListenerTest {
     }
 
     @Test
-    void shouldSkipLatencyMetrics_whenAcceptedAtMissing() {
+    void shouldSkipLatency_whenAcceptedAtMissing() {
         // Arrange
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        MetricEventConsumerListener listener = listenerWith(registry, Clock.fixed(NOW, ZoneOffset.UTC));
+        MetricEventConsumerListener listener = new MetricEventConsumerListener(
+                writer, objectMapper(), registry, Clock.fixed(NOW, ZoneOffset.UTC));
         String payload = payload(null);
 
         // Act
         listener.onBatch(List.of(record(payload)));
 
         // Assert
-        assertThat(registry.timer("pulse.event.age", "consumer", "storage-group").count())
+        assertThat(registry.timer("pulse.e2e.clickhouse.visible").count())
                 .as("событие без acceptedAt не добавляет наблюдений в гистограмму")
                 .isZero();
-        assertThat(registry.timer("pulse.e2e.clickhouse.visible").count())
-                .as("и в задержку видимости тоже")
-                .isZero();
-    }
-
-    private MetricEventConsumerListener listenerWith(SimpleMeterRegistry registry, Clock clock) {
-        return new MetricEventConsumerListener(writer, objectMapper(), registry, clock);
     }
 
     private static ObjectMapper objectMapper() {

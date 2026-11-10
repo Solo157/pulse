@@ -1,8 +1,8 @@
 {
-  "title": "Pulse overview (Этапы 1-5)",
+  "title": "Pulse overview (8 метрик)",
   "uid": "pulse-overview",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
   "time": {
     "from": "now-30m",
@@ -26,7 +26,7 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Ingest accepted (FR-1)",
+      "title": "Incoming Throughput (принято точек/с)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -48,8 +48,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (service) (rate(pulse_ingest_accepted_total[1m]))",
-          "legendFormat": "{{service}}",
+          "expr": "sum(rate(pulse_ingest_accepted_total[1m]))",
+          "legendFormat": "точки/с",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -60,7 +60,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Ingest rejected / replay (outcome)",
+      "title": "Processing Throughput (обработано точек/с)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -73,7 +73,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "reqps",
           "custom": {
             "fillOpacity": 10
           }
@@ -82,16 +82,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (outcome) (rate(pulse_ingest_rejected_total[1m]))",
-          "legendFormat": "rejected {{outcome}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "sum(rate(pulse_ingest_idempotent_replay_total[1m]))",
-          "legendFormat": "idempotent replay",
+          "expr": "sum(rate(pulse_processing_points_total[1m]))",
+          "legendFormat": "точки/с",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -102,7 +94,7 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Kafka publish failures (FR-1)",
+      "title": "HTTP Request Rate",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -124,7 +116,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (service) (rate(pulse_kafka_publish_failure_total[5m]))",
+          "expr": "sum by (service) (rate(http_server_requests_seconds_count[1m]))",
           "legendFormat": "{{service}}",
           "datasource": {
             "type": "prometheus",
@@ -136,7 +128,7 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Storage inserted points (FR-2)",
+      "title": "HTTP Error Rate (доля 4xx/5xx)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -149,7 +141,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "percentunit",
           "custom": {
             "fillOpacity": 10
           }
@@ -158,8 +150,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (service) (rate(pulse_storage_inserted_points_total[1m]))",
-          "legendFormat": "{{service}}",
+          "expr": "sum(rate(http_server_requests_seconds_count{status=~\"[45]..\"}[1m])) / sum(rate(http_server_requests_seconds_count[1m]))",
+          "legendFormat": "доля",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -170,7 +162,7 @@
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Storage insert duration avg (FR-1)",
+      "title": "API Latency (p95)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -192,8 +184,8 @@
       },
       "targets": [
         {
-          "expr": "rate(pulse_storage_insert_duration_seconds_sum[1m]) / rate(pulse_storage_insert_duration_seconds_count[1m])",
-          "legendFormat": "{{service}}",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket[5m])))",
+          "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -204,7 +196,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Processing points / notifications (FR-3/FR-2)",
+      "title": "Kafka Consumer Lag by group/partition",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -214,218 +206,6 @@
         "w": 8,
         "x": 16,
         "y": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(pulse_processing_points_total[1m]))",
-          "legendFormat": "processing points",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "sum by (status) (rate(pulse_notifications_total[1m]))",
-          "legendFormat": "notifications {{status}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 7,
-      "type": "timeseries",
-      "title": "HTTP request rate by service",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 16
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum by (service, uri) (rate(http_server_requests_seconds_count[1m]))",
-          "legendFormat": "{{service}} {{uri}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 8,
-      "type": "timeseries",
-      "title": "HTTP p95 latency (FR-1 latency)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 16
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (le, service) (rate(http_server_requests_seconds_bucket[5m])))",
-          "legendFormat": "{{service}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 9,
-      "type": "timeseries",
-      "title": "JVM heap used / max ratio (resource)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 16
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "max by (service) (jvm_memory_used_bytes{area=\"heap\"}) / max by (service) (jvm_memory_max_bytes{area=\"heap\"} > 0)",
-          "legendFormat": "{{service}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 10,
-      "type": "timeseries",
-      "title": "Process CPU load (resource)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 24
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "max by (service) (process_cpu_usage)",
-          "legendFormat": "{{service}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Uptime (scale-up visibility)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 24
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "time() - max by (instance, service) (process_start_time_seconds)",
-          "legendFormat": "{{service}} {{instance}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Kafka consumer lag by group/partition",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -439,7 +219,7 @@
       "targets": [
         {
           "expr": "kafka_consumergroup_group_lag",
-          "legendFormat": "{{group}} {{topic}}/{{partition}}",
+          "legendFormat": "{{group}} / {{partition}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -448,77 +228,9 @@
       ]
     },
     {
-      "id": 13,
+      "id": 7,
       "type": "timeseries",
-      "title": "Lag growth rate (deriv 5m)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 32
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum by (group) (deriv(kafka_consumergroup_group_topic_sum_lag[5m]))",
-          "legendFormat": "{{group}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 14,
-      "type": "timeseries",
-      "title": "Consumer throughput (offset rate)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 32
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum by (group) (rate(kafka_consumergroup_group_offset[5m]))",
-          "legendFormat": "{{group}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 15,
-      "type": "timeseries",
-      "title": "Group max time lag (time-to-drain)",
+      "title": "Metric Storage Latency (p95)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -527,7 +239,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 40
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -539,59 +251,9 @@
         "overrides": []
       },
       "targets": [
-        {
-          "expr": "kafka_consumergroup_group_max_lag_seconds",
-          "legendFormat": "{{group}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 16,
-      "type": "timeseries",
-      "title": "E2E: ingest accepted -> ClickHouse visible (FR: <=5 s)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 40
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(pulse_e2e_clickhouse_visible_seconds_bucket[5m])))",
-          "legendFormat": "visible p50",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
         {
           "expr": "histogram_quantile(0.95, sum by (le) (rate(pulse_e2e_clickhouse_visible_seconds_bucket[5m])))",
-          "legendFormat": "visible p95",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(pulse_e2e_clickhouse_visible_seconds_bucket[5m])))",
-          "legendFormat": "visible p99",
+          "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -600,9 +262,9 @@
       ]
     },
     {
-      "id": 17,
+      "id": 8,
       "type": "timeseries",
-      "title": "E2E: ingest accepted -> incident published (FR: <=10/20 s)",
+      "title": "Incident Detection Latency (p95)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -611,7 +273,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 40
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -623,125 +285,9 @@
         "overrides": []
       },
       "targets": [
-        {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(pulse_e2e_incident_published_seconds_bucket[5m])))",
-          "legendFormat": "incident p50",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
         {
           "expr": "histogram_quantile(0.95, sum by (le) (rate(pulse_e2e_incident_published_seconds_bucket[5m])))",
-          "legendFormat": "incident p95",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(pulse_e2e_incident_published_seconds_bucket[5m])))",
-          "legendFormat": "incident p99",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 18,
-      "type": "timeseries",
-      "title": "E2E: incident published -> notification SENT",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 40
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(pulse_e2e_notification_sent_seconds_bucket[5m])))",
-          "legendFormat": "SENT p50",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(pulse_e2e_notification_sent_seconds_bucket[5m])))",
-          "legendFormat": "SENT p95",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(pulse_e2e_notification_sent_seconds_bucket[5m])))",
-          "legendFormat": "SENT p99",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 19,
-      "type": "timeseries",
-      "title": "Kafka event age at consumers (p50/p95/p99)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 48
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(pulse_event_age_seconds_bucket[5m])))",
-          "legendFormat": "{{consumer}} p50",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(pulse_event_age_seconds_bucket[5m])))",
-          "legendFormat": "{{consumer}} p95",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(pulse_event_age_seconds_bucket[5m])))",
-          "legendFormat": "{{consumer}} p99",
+          "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"

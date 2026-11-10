@@ -51,18 +51,4 @@ public class NotificationRepository {
                 """, status.name(), attempts, sentAt == null ? null : Timestamp.from(sentAt),
                 sourceEventId);
     }
-
-    /**
-     * Возраст самой старой доставки в статусе {@code DELIVERING}, секунд; 0 — таких нет.
-     * Нет нулевых строк после успешного запуска сервиса: {@code DELIVERING} остаётся
-     * только если процесс умер между claim и finish (строка терминальна для повторов).
-     */
-    public double oldestDeliveringAgeSeconds() {
-        Double age = jdbcTemplate.queryForObject("""
-                SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MIN(created_at))), 0)
-                FROM metric.notifications
-                WHERE status = 'DELIVERING'
-                """, Double.class);
-        return age == null ? 0 : age;
-    }
 }

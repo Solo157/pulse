@@ -30,8 +30,6 @@ public class MetricIngestService {
     private final IngestIdempotencyRepository idempotencyRepository;
     private final int maxPointsPerRequest;
     private final Counter acceptedCounter;
-    private final Counter rejectedCounter;
-    private final Counter replayCounter;
 
     public MetricIngestService(UserService userService,
                                MetricEventPublisher publisher,
@@ -43,8 +41,6 @@ public class MetricIngestService {
         this.idempotencyRepository = idempotencyRepository;
         this.maxPointsPerRequest = properties.maxPointsPerRequest();
         this.acceptedCounter = meterRegistry.counter("pulse.ingest.accepted");
-        this.rejectedCounter = meterRegistry.counter("pulse.ingest.rejected");
-        this.replayCounter = meterRegistry.counter("pulse.ingest.idempotent_replay");
     }
 
     /**
@@ -59,18 +55,15 @@ public class MetricIngestService {
     public IngestResponse ingest(UUID userId, MetricBatchRequest request, String idempotencyKey,
                                  String requestId) {
         if (request == null || request.metrics() == null || request.metrics().isEmpty()) {
-            rejectedCounter.increment();
             throw new IllegalArgumentException("Тело запроса не содержит metric-точек");
         }
         List<MetricPoint> points = request.metrics();
         if (points.size() > maxPointsPerRequest) {
-            rejectedCounter.increment();
             throw new com.pulse.metric.exception.PayloadTooLargeException(
                     "Слишком большой пакет: " + points.size() + " точек, максимум " + maxPointsPerRequest);
         }
         validatePoints(points);
         if (!userService.userExists(userId)) {
-            rejectedCounter.increment();
             throw new UserNotFoundException(userId.toString());
         }
 
@@ -100,7 +93,6 @@ public class MetricIngestService {
         }
         IngestIdempotencyRepository.Row row = rows.get(0);
         if (IngestIdempotencyRepository.STATUS_COMPLETED.equals(row.status())) {
-            replayCounter.increment();
             log.debug("Повтор идемпотентного запроса {}, отдаём прежний ответ", idempotencyKey);
             return new IngestResponse(row.eventId(), userId.toString(), row.acceptedCount());
         }

@@ -60,9 +60,8 @@ management:
   metrics:
     distribution:
       percentiles-histogram:
-        pulse.event.age: true
+        http.server.requests: true
         pulse.e2e.clickhouse.visible: true
-        pulse.storage.insert.duration: true
     tags:
       application: ${spring.application.name}
       instance: ${INSTANCE_ID:${HOSTNAME:${spring.application.name}}}

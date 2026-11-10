@@ -1,8 +1,6 @@
 package com.pulse.storage.service;
 
 import com.pulse.contracts.common.MetricPoint;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,13 +24,9 @@ public class ClickHousePointsWriter {
             """;
 
     private final JdbcTemplate jdbcTemplate;
-    private final Counter insertedPoints;
-    private final Counter insertFailures;
 
-    public ClickHousePointsWriter(JdbcTemplate jdbcTemplate, MeterRegistry meterRegistry) {
+    public ClickHousePointsWriter(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
-        this.insertedPoints = meterRegistry.counter("pulse.storage.inserted_points");
-        this.insertFailures = meterRegistry.counter("pulse.storage.insert_failures");
     }
 
     /** Вставляет все точки одного MetricEvent одним пакетом. */
@@ -46,13 +40,7 @@ public class ClickHousePointsWriter {
                     Timestamp.from(point.timestamp()),
                     eventId});
         }
-        try {
-            jdbcTemplate.batchUpdate(INSERT_SQL, rows);
-            insertedPoints.increment(rows.size());
-            log.debug("Записано {} точек (событие {})", rows.size(), eventId);
-        } catch (RuntimeException exception) {
-            insertFailures.increment();
-            throw exception;
-        }
+        jdbcTemplate.batchUpdate(INSERT_SQL, rows);
+        log.debug("Записано {} точек (событие {})", rows.size(), eventId);
     }
 }

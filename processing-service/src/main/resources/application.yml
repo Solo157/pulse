@@ -62,7 +62,7 @@ management:
   metrics:
     distribution:
       percentiles-histogram:
-        pulse.event.age: true
+        http.server.requests: true
         pulse.e2e.incident.published: true
     tags:
       application: ${spring.application.name}

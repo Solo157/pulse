@@ -1,6 +1,8 @@
 package com.pulse.processing.listener;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -8,22 +10,19 @@ import com.pulse.contracts.common.MetricPoint;
 import com.pulse.contracts.event.MetricEvent;
 import com.pulse.contracts.event.SchemaVersions;
 import com.pulse.processing.service.IncidentEvaluator;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 /**
- * Возраст пакета метрик на входе группы processing-metrics: гистограмма
- * {@code pulse.event.age} отсчитывается от acceptedAt (изоляция: замоканный
- * оценщик, фиксированные часы, реестр в памяти).
+ * Группа processing-metrics разбирает MetricEvent и передаёт его оценщику;
+ * неразобранное сообщение — сигнал для повтора error-handler'ом (изоляция:
+ * замоканный оценщик).
  */
 @ExtendWith(MockitoExtension.class)
 class MetricIncidentListenerTest {
@@ -35,46 +34,39 @@ class MetricIncidentListenerTest {
     private IncidentEvaluator evaluator;
 
     @Test
-    void shouldRecordEventAge_whenAcceptedAtPresent() {
+    void shouldDelegateParsedEvent_whenPayloadValid() {
         // Arrange
-        SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        MetricIncidentListener listener = new MetricIncidentListener(evaluator,
-                new ObjectMapper().registerModule(new JavaTimeModule()), registry,
-                Clock.fixed(NOW, ZoneOffset.UTC));
-        String payload = payload(Instant.parse("2026-11-09T09:59:57Z"));
+        MetricIncidentListener listener = new MetricIncidentListener(evaluator, objectMapper());
 
         // Act
-        listener.onMetricEvent(payload);
+        listener.onMetricEvent(payload());
 
         // Assert
-        assertThat(registry.timer("pulse.event.age", "consumer", "processing-metrics").totalTime(TimeUnit.SECONDS))
-                .as("возраст пакета от acceptedAt до момента обработки")
-                .isEqualTo(3.0);
+        ArgumentCaptor<MetricEvent> captor = ArgumentCaptor.forClass(MetricEvent.class);
+        verify(evaluator).process(captor.capture());
+        assertThat(captor.getValue().eventId()).isEqualTo("event-1");
+        assertThat(captor.getValue().userId()).isEqualTo(USER.toString());
     }
 
     @Test
-    void shouldSkipEventAge_whenAcceptedAtMissing() {
+    void shouldFailForRedelivery_whenPayloadUnreadable() {
         // Arrange
-        SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        MetricIncidentListener listener = new MetricIncidentListener(evaluator,
-                new ObjectMapper().registerModule(new JavaTimeModule()), registry,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+        MetricIncidentListener listener = new MetricIncidentListener(evaluator, objectMapper());
 
-        // Act
-        listener.onMetricEvent(payload(null));
-
-        // Assert
-        assertThat(registry.timer("pulse.event.age", "consumer", "processing-metrics").count())
-                .as("событие без acceptedAt не добавляет наблюдений в гистограмму")
-                .isZero();
+        // Act & Assert
+        assertThatThrownBy(() -> listener.onMetricEvent("{битое"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
-    private static String payload(Instant acceptedAt) {
+    private static ObjectMapper objectMapper() {
+        return new ObjectMapper().registerModule(new JavaTimeModule());
+    }
+
+    private static String payload() {
         try {
-            return new ObjectMapper().registerModule(new JavaTimeModule()).writeValueAsString(
-                    new MetricEvent("event-1", USER.toString(), SchemaVersions.CURRENT, acceptedAt,
-                            "req-1", List.of(new MetricPoint("cpu", 1.0, acceptedAt == null
-                                    ? NOW : acceptedAt))));
+            return objectMapper().writeValueAsString(new MetricEvent("event-1", USER.toString(),
+                    SchemaVersions.CURRENT, NOW, "req-1",
+                    List.of(new MetricPoint("cpu", 1.0, NOW))));
         } catch (Exception failure) {
             throw new IllegalStateException(failure);
         }

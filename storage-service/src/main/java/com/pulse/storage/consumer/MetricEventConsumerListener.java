@@ -22,8 +22,7 @@ import org.springframework.stereotype.Component;
  * всей пачки (spring.listener.ack-mode=batch); при ошибке вставки offset не двигается,
  * контейнер повторяет пачку с backoff.
  *
- * <p>Сквозные задержки (FR «доступность данных до 5 с»): гистограмма
- * {@code pulse.event.age} — возраст события на входе потребителя (от acceptedAt),
+ * <p>Сквозная задержка (FR «доступность данных до 5 с»): гистограмма
  * {@code pulse.e2e.clickhouse.visible} — от принятия пакета до записи в ClickHouse,
  * после которой он виден запросам. Метки ограничены: ни userId, ни eventId в них нет.</p>
  */
@@ -35,8 +34,6 @@ public class MetricEventConsumerListener {
     private final ClickHousePointsWriter writer;
     private final ObjectMapper objectMapper;
     private final Clock clock;
-    private final Timer insertTimer;
-    private final Timer eventAgeTimer;
     private final Timer visibleTimer;
 
     public MetricEventConsumerListener(ClickHousePointsWriter writer,
@@ -46,19 +43,15 @@ public class MetricEventConsumerListener {
         this.writer = writer;
         this.objectMapper = objectMapper;
         this.clock = clock;
-        this.insertTimer = meterRegistry.timer("pulse.storage.insert.duration");
-        this.eventAgeTimer = meterRegistry.timer("pulse.event.age", "consumer", "storage-group");
         this.visibleTimer = meterRegistry.timer("pulse.e2e.clickhouse.visible");
     }
 
     /** Одна пачка (poll) обрабатывается одним вызовом: максимум max-poll-records событий. */
     @KafkaListener(topics = "${pulse.metrics-topic}", groupId = "storage-group")
     public void onBatch(List<ConsumerRecord<String, String>> records) {
-        insertTimer.record(() -> {
-            for (ConsumerRecord<String, String> record : records) {
-                process(record);
-            }
-        });
+        for (ConsumerRecord<String, String> record : records) {
+            process(record);
+        }
     }
 
     private void process(ConsumerRecord<String, String> record) {
@@ -73,7 +66,6 @@ public class MetricEventConsumerListener {
         }
         MDC.put("requestId", event.requestId());
         try {
-            recordSinceAccepted(eventAgeTimer, event);
             writer.insertPoints(event.userId(), event.eventId(), event.points());
             recordSinceAccepted(visibleTimer, event);
         } finally {

@@ -5,15 +5,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pulse.contracts.event.IncidentDetected;
 import com.pulse.contracts.event.SchemaVersions;
-import com.pulse.notification.config.NotificationDeliveryAgeMetrics;
 import com.pulse.notification.repository.NotificationRepository;
-import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -27,7 +30,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 /**
  * Гибель процесса посреди доставки (P1-6): строка остаётся {@code DELIVERING},
  * повторное событие Kafka не инициирует новую доставку (claim уже занят) и не
- * меняет строку; возраст такой строки доступен для метрики наблюдения.
+ * меняет строку.
  */
 @SpringBootTest(properties = {
         "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
@@ -35,7 +38,6 @@ import org.testcontainers.junit.jupiter.Testcontainers;
         "pulse.delivery-timeout=300ms",
         "pulse.delivery-max-attempts=2",
         "pulse.delivery-retry-delay=100ms",
-        "pulse.pending-age-refresh=1h",
         "management.health.defaults.enabled=false"
 })
 @EmbeddedKafka(topics = "incidents", count = 1)
@@ -57,19 +59,16 @@ class NotificationStuckDeliveryIntegrationTest {
     private KafkaTemplate<String, String> kafkaTemplate;
 
     @Autowired
+    private NotificationRepository repository;
+
+    @Value("${spring.embedded.kafka.brokers}")
+    private String bootstrapServers;
+
+    @Autowired
     private ObjectMapper objectMapper;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
-
-    @Autowired
-    private NotificationRepository repository;
-
-    @Autowired
-    private NotificationDeliveryAgeMetrics ageMetrics;
-
-    @Autowired
-    private MeterRegistry meterRegistry;
 
     @Test
     void повторПослеГибелиПосредиДоставкиНеДоставляетЗановоИНеМеняетСтроку() throws Exception {
@@ -84,29 +83,31 @@ class NotificationStuckDeliveryIntegrationTest {
         kafkaTemplate.send("incidents", userId.toString(),
                         objectMapper.writeValueAsString(incident(eventId, userId)))
                 .get(10, TimeUnit.SECONDS);
-
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-        while (System.nanoTime() < deadline) {
-            if (meterRegistry.find("pulse.notifications").tag("status", "duplicate").counter() != null
-                    && meterRegistry.find("pulse.notifications").tag("status", "duplicate")
-                            .counter().count() >= 1.0) {
-                break;
-            }
-            Thread.sleep(100);
-        }
+        awaitConsumed("notification-group");
 
         Map<String, Object> row = jdbcTemplate.queryForMap(
                 "SELECT status, attempts FROM metric.notifications WHERE source_event_id = ?",
                 eventId);
         assertThat(row.get("status")).isEqualTo("DELIVERING");
         assertThat(((Number) row.get("attempts")).intValue()).isZero();
-        assertThat(meterRegistry.find("pulse.notifications").tag("status", "duplicate")
-                .counter().count()).isEqualTo(1.0);
+    }
 
-        assertThat(repository.oldestDeliveringAgeSeconds()).isGreaterThan(0.0);
-        ageMetrics.refresh();
-        assertThat(meterRegistry.find("pulse.notification.oldest.pending.age")
-                .gauge().value()).isGreaterThan(0.0);
+    /** Ждём, пока группа прочитает отправленное событие: инцидент реально обработан повторно. */
+    private void awaitConsumed(String groupId) throws Exception {
+        TopicPartition partition = new TopicPartition("incidents", 0);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+                bootstrapServers))) {
+            while (System.nanoTime() < deadline) {
+                OffsetAndMetadata committed = admin.listConsumerGroupOffsets(groupId)
+                        .partitionsToOffsetAndMetadata().get(10, TimeUnit.SECONDS).get(partition);
+                if (committed != null && committed.offset() >= 1) {
+                    return;
+                }
+                Thread.sleep(100);
+            }
+        }
+        throw new AssertionError("группа " + groupId + " не прочитала событие из incidents");
     }
 
     private IncidentDetected incident(String eventId, UUID userId) {

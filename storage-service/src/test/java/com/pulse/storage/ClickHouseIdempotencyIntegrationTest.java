@@ -5,13 +5,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.pulse.contracts.common.MetricPoint;
 import com.pulse.storage.service.ClickHousePointsWriter;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.junit.jupiter.api.MethodOrderer.OrderAnnotation;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,6 +37,7 @@ import org.testcontainers.utility.DockerImageName;
         "spring.kafka.bootstrap-servers=localhost:19092"
 })
 @Testcontainers
+@TestMethodOrder(OrderAnnotation.class)
 class ClickHouseIdempotencyIntegrationTest {
 
     private static final int HTTP_PORT = 8123;
@@ -64,11 +66,9 @@ class ClickHouseIdempotencyIntegrationTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
-    @Autowired
-    private MeterRegistry meterRegistry;
-
     @Test
-    void should_whenBatchFailsPartially_then_nothingOrDuplicatesOnlyAndCounterCountsFailure() {
+    @Order(1)
+    void should_whenBatchFailsPartial_then_noPartialRowsPersisted() {
         UUID userId = UUID.randomUUID();
         Instant ts = Instant.parse("2026-11-09T10:00:00Z");
         writer.insertPoints(userId.toString(), UUID.randomUUID().toString(), List.of(
@@ -83,16 +83,13 @@ class ClickHouseIdempotencyIntegrationTest {
                 new MetricPoint("net_usage", 5.0, ts))))
                 .isInstanceOf(RuntimeException.class);
 
-        Counter failures = meterRegistry.find("pulse.storage.insert_failures").counter();
-        assertThat(failures).isNotNull();
-        assertThat(failures.count()).isEqualTo(1.0);
-
         assertThat(countGood(userId)).isEqualTo(2);
         // Неопределённый/ошибочный батч не оставил «половин» — таблица не выросла.
         assertThat(countTable()).isEqualTo(beforeFailure);
     }
 
     @Test
+    @Order(2)
     void should_whenRetryAfterUncertainInsert_then_finalSelectReturnsUniquePoints() {
         UUID userId = UUID.randomUUID();
         UUID eventId = UUID.randomUUID();
@@ -114,6 +111,7 @@ class ClickHouseIdempotencyIntegrationTest {
     }
 
     @Test
+    @Order(3)
     void should_whenSamePointTwiceInOneEvent_then_mergedBySortingKey() {
         UUID userId = UUID.randomUUID();
         UUID eventId = UUID.randomUUID();

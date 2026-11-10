@@ -70,6 +70,9 @@ management:
         enabled: true
       show-details: never
   metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
     tags:
       application: ${spring.application.name}
       instance: ${INSTANCE_ID:${spring.application.name}}
