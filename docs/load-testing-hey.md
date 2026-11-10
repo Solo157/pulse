@@ -122,20 +122,29 @@ JVM heap и CPU на дашборд не вынесены (решение опе
 Лаг вручную: `docker exec kafka1 /opt/kafka/bin/kafka-consumer-groups.sh
 --bootstrap-server localhost:9092 --describe --all-groups`.
 
-## Расшифровка E2E-панелей (FR)
+## Восемь метрик: смысл и расчёт
 
-| Панель | Что измеряет | FR |
-|---|---|---|
-| «Metric Storage Latency (p95)» | от принятия пакета точкой до появления в ClickHouse | ≤ 5 с |
-| «Incident Detection Latency (p95)» | от времени точки до подтверждения события инцидента брокером | ≤ 10–20 с |
+Prometheus-арифметика stateless: сервисы лишь отдают счётчики/таймеры с
+`/actuator/prometheus` (scrape 10 с); «в секунду» и перцентили считаются
+запросом. `rate(m[1m])` — средняя производная счётчика за окно (рестарт копии
+обнуляет счётчик, `rate` это учитывает); `histogram_quantile(0.95, …)`
+интерполирует квантиль по ведрам `_bucket` — точность ограничена шириной
+ведра, а сами вёдра включены `percentiles-histogram` в yml сервисов. Метку
+`service` на HTTP-панелях ставит relabel Prometheus (`prometheus.yml`), не
+приложение.
 
-Панель «Kafka Consumer Lag by group/partition» — сколько сообщений не прочитано
-каждым consumer group; рост = не справляемся, падение = дренаж. Задержка
-доставки уведомлений Observability-дашборда намеренно не входит (решение
-оператора, 8 метрик); факт доставки проверяется в БД:
+| # | Панель / запрос | Что измеряет | Кто снимает |
+|---|---|---|---|
+| 1 | Incoming Throughput — `sum(rate(pulse_ingest_accepted_total[1m]))` | принятые **точки**/с (не пакеты): инкремент `points.size()` только после Kafka-ack, до него — 202 | metric-service, `MetricIngestService` |
+| 2 | Processing Throughput — `sum(rate(pulse_processing_points_total[1m]))` | точки/с, прогнанные через правила; разрыв 1−2 = очередь группы обработки | processing-service, `IncidentEvaluator` |
+| 3 | HTTP Request Rate — `sum by (service)(rate(http_server_requests_seconds_count[1m]))` | RPS сервиса (встроенный таймер Spring Boot, метки uri/status); видно балансировку nginx по копиям | все сервисы |
+| 4 | HTTP Error Rate — доля `{status~"[45].."}` | доля 4xx/5xx (0..1) по всему стенду; при живой Kafka ~0, при `kill kafka1` честная 1. При нулевом трафике 0/0=NaN (пусто) | все сервисы |
+| 5 | API Latency (p95) — `histogram_quantile(0.95, …http…bucket[5m])` | только **синхронный** HTTP-ответ (FR-1): инжест отвечает сразу после Kafka-ack; хвост конвейера — это №7/№8, поэтому «долгое» хранилище здесь не видно | все сервисы |
+| 6 | Kafka Consumer Lag — `kafka_consumergroup_group_lag` | непрочитанные **сообщения** (не секунды) по каждой группе/партиции: log-end offset − committed offset по Admin API | `kafka-lag-exporter` (сам в группы не вступает) |
+| 7 | Metric Storage Latency (p95) — `pulse_e2e_clickhouse_visible_*` | FR: от метки `acceptedAt` (ставит metric-service при приёме) до успешной вставки батча в ClickHouse. Время точки (`sampleTime`) не входит. При остановленном storage наблюдения не появляются (панель гаснет; рост — это лаг №6) | storage-service, `MetricEventConsumerListener` |
+| 8 | Incident Detection Latency (p95) — `pulse_e2e_incident_published_*` | FR: от **времени точки** (`sampleTime`) до Kafka-ack события `IncidentDetected`; только генерация нарушения, без закрытий. Старый timestamp законно раздувает метрику, timestamp в будущем даёт отрицательную длительность и Micrometer молча выбрасывает наблюдение (панель пустая — граблили) | processing-service, `IncidentPublisher` |
+
+FR-ориентиры: №7 ≤ 5 с, №8 ≤ 10–20 с (здоровый стенд — доли секунды/десятки
+секунд при лаге). Панели доставки уведомлений намеренно нет (решение
+оператора, набор = 8 метрик); факт доставки проверяется в БД:
 `select status, count(*) from metric.notifications group by 1`.
-
-Примечание про установку hey на другой машине: используйте тот же бинарник,
-что лежит в `/usr/bin/hey` на этом стенде (копия не в deb-пакете), либо любой
-собранный `hey` с тем же набором флагов, которые применяются здесь:
-`-n -c -q -z -m -H -T -d -a -o csv`.
