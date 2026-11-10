@@ -14,7 +14,7 @@ F2, F3, F4, F7
 
 | # | Сценарий | Клиентский эффект | Данные | Восстановление |
 |---|---|---|---|---|
-| F1 | `docker kill -9` реплики metric-service под нагрузкой (2 реплики; nginx retry `non_idempotent`). Замер 2026-11-09: baseline 30 REQ/s, 40 с, kill на 18-й секунде | **8 клиентских ошибок** (TCP-обрыв к убитой реплике): генератор без retry, nginx повторил успешные обращения сам; p50 5.7 / p95 11.5 / max 894 мс | потерь принятых нет: журнал COMPLETED = accepted = ClickHouse = 1189; висящих IN_PROGRESS после kill не осталось | `compose up -d` реплики |
+| F1 | `docker kill -9` реплики metric-service под нагрузкой (2 реплики; nginx retry `non_idempotent`). Замер 2026-11-09: baseline 30 REQ/s, 40 с, kill на 18-й секунде | **8 клиентских ошибок** (TCP-обрыв к убитой реплике): генератор без retry, nginx повторил успешные обращения сам; p50 5.7 / p95 11.5 / max 894 мс | потерь принятых нет: журнал COMPLETED = принято = ClickHouse = 1189; висящих IN_PROGRESS после kill не осталось | `compose up -d` реплики |
 | F2 | остановка storage-service (прогон 2026-11-07) | 0 ошибок (ingest идёт в Kafka), p95 6 мс | LAG `storage-group` ≈ 800 | после start: LAG→0 за ~23 c, без потерь (commit только после записи в CH) |
 | F3 | остановка processing-service (прогон 2026-11-07) | 0 ошибок, p95 6 мс | LAG `processing-group` ≈ 800; LAG storage = 0 (пути независимы) | LAG→0 за ~23 c |
 | F4 | остановка notification-service (прогон 2026-11-07) | ingest 202 в штатном режиме | LAG `notification-group` растёт; инциденты уже в PG/топике | после start инциденты доставлены, LAG→0 ~25 c |
