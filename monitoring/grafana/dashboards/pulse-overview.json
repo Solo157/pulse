@@ -1,8 +1,8 @@
 {
-  "title": "Pulse overview (9 метрик)",
+  "title": "Pulse overview (8 метрик)",
   "uid": "pulse-overview",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "10s",
   "time": {
     "from": "now-30m",
@@ -84,40 +84,6 @@
         {
           "expr": "sum(rate(pulse_processing_points_total[1m]))",
           "legendFormat": "точки/с",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "type": "timeseries",
-      "title": "HTTP Request Rate",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 0
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "fillOpacity": 10
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum by (service) (rate(http_server_requests_seconds_count[1m]))",
-          "legendFormat": "{{service}}",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
