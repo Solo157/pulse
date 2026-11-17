@@ -1,0 +1,14 @@
+{
+ "profile": "burst",
+ "base_rps": 10.0,
+ "duration_s": 60.0,
+ "workers": 32,
+ "burst_mult": 5.0,
+ "step_mults": null,
+ "sent_ok": 1396,
+ "sent_err": 0,
+ "p50_ms": 4.35,
+ "p95_ms": 5.82,
+ "max_ms": 7.94,
+ "user_id": "42a7999d-07d2-436e-9a0e-eae211d76a96"
+}

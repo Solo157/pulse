@@ -1,0 +1,18 @@
+{
+ "profile": "step",
+ "base_rps": 10.0,
+ "duration_s": 180.0,
+ "workers": 16,
+ "burst_mult": null,
+ "step_mults": [
+  1.0,
+  2.0,
+  4.0
+ ],
+ "sent_ok": 4190,
+ "sent_err": 0,
+ "p50_ms": 5.09,
+ "p95_ms": 7.06,
+ "max_ms": 15.12,
+ "user_id": "bf424ba8-75ab-4138-8c0d-dd77ae447b2d"
+}
